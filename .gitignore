@@ -1,0 +1,10 @@
+node_modules
+.aider*
+.env
+.env.bak
+proxy-data.db
+proxy-data.db-*
+usage-stats.json
+dist
+build
+.DS_Store

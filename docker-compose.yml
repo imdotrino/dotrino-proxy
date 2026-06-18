@@ -1,0 +1,51 @@
+# Nodo proxy autohospedado, turnkey. Un tercero hace:
+#   cp .env.docker.example .env   (y completa PROXY_DOMAIN + VAPID_SUBJECT)
+#   docker compose up -d
+# y obtiene wss://proxy.sudominio.com con TLS automático (Caddy + Let's Encrypt).
+# Caddy proxea WebSocket de forma transparente.
+#
+# Requisitos: PROXY_DOMAIN debe apuntar (A/AAAA) a este host, con 80/443 abiertos
+# (Caddy los usa para el cert ACME). DNS directo, sin proxy de Cloudflare (la
+# nube naranja corta las conexiones WebSocket de larga vida).
+#
+# Para PROBAR sin dominio/TLS: comentá `caddy` y descomentá el `ports` de `proxy`.
+
+services:
+  proxy:
+    image: ghcr.io/dotrino/simple-websocket-proxy:latest
+    # Para compilar de fuente en vez de bajar la imagen: comentá `image` y descomentá:
+    # build: .
+    environment:
+      PORT: 4001
+      PROXY_DB_FILE: /data/proxy-data.db
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
+      # Opcional: par VAPID explícito. Si se omite, el proxy lo autogenera y lo
+      # persiste en SQLite (estable entre reinicios mientras conserves el volumen).
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+    volumes:
+      - proxy-data:/data
+    restart: unless-stopped
+    # Para probar sin Caddy/TLS, descomentá:
+    # ports:
+    #   - "4001:4001"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PROXY_DOMAIN: ${PROXY_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - proxy
+    restart: unless-stopped
+
+volumes:
+  proxy-data:
+  caddy-data:
+  caddy-config:

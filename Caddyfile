@@ -1,0 +1,6 @@
+# Caddy saca/renueva el cert TLS de Let's Encrypt y reverse-proxea al proxy.
+# El upgrade a WebSocket lo maneja Caddy de forma transparente (no requiere
+# configuración extra). Pasa X-Forwarded-For para el rate-limit por IP.
+{$PROXY_DOMAIN} {
+	reverse_proxy proxy:4001
+}
