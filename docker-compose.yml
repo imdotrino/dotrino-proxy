@@ -12,7 +12,7 @@
 
 services:
   proxy:
-    image: ghcr.io/dotrino/simple-websocket-proxy:latest
+    image: ghcr.io/imdotrino/dotrino-proxy:latest
     # Para compilar de fuente en vez de bajar la imagen: comentá `image` y descomentá:
     # build: .
     environment:

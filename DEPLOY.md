@@ -14,7 +14,7 @@ Web Push (timbre) y la persistencia SQLite agregados en esta versión.
 
 ```bash
 # en el servidor
-git clone git@github.com:imdotrino/simple-websocket-proxy.git
+git clone git@github.com:imdotrino/dotrino-proxy.git
 cd simple-websocket-proxy
 npm ci                 # instala deps exactas (ws, dotenv, web-push)
 cp .env.example .env   # opcional: editar si querés config explícita
@@ -44,13 +44,13 @@ After=network.target
 [Service]
 Type=simple
 User=seyacat
-WorkingDirectory=/home/dotrino/simple-websocket-proxy
+WorkingDirectory=/home/imdotrino/dotrino-proxy
 ExecStart=/usr/bin/env node server.js
 Restart=always
 RestartSec=3
 # Node >= 22.5 en PATH; si usás nvm, apuntá al binario absoluto:
 # ExecStart=/home/dotrino/.nvm/versions/node/v22.x/bin/node server.js
-EnvironmentFile=/home/dotrino/simple-websocket-proxy/.env
+EnvironmentFile=/home/imdotrino/dotrino-proxy/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -108,7 +108,7 @@ Recomendaciones:
 ## 6. Actualizar (deploy de nueva versión)
 
 ```bash
-cd /home/dotrino/simple-websocket-proxy
+cd /home/imdotrino/dotrino-proxy
 git pull
 npm ci
 sudo systemctl restart dotrino-proxy

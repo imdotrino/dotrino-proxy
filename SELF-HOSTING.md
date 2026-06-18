@@ -22,7 +22,7 @@ cada identidad, el proxy es un **caño tonto**: no ve ni puede falsificar nada.
 ## 2. Levantarlo (turnkey)
 
 ```bash
-git clone https://github.com/imdotrino/simple-websocket-proxy
+git clone https://github.com/imdotrino/dotrino-proxy
 cd simple-websocket-proxy
 cp .env.docker.example .env
 # editá .env: PROXY_DOMAIN y VAPID_SUBJECT (tu email)
