@@ -1,5 +1,7 @@
 # Simple WebSocket Proxy Simplificado
 
+> **Parte del ecosistema [Dotrino](https://dotrino.com).** Misión: aplicaciones que resuelven problemas comunes, respetando tu privacidad — sin anuncios, sin cookies, sin rastreo de datos, sin vender tu identidad a nadie.
+
 Un servidor WebSocket proxy que implementa las 4 reglas especificadas en `definition.txt`:
 1. Asignación de tokens de 4 caracteres alfanuméricos (1-9, A-Z)
 2. Envío de mensajes a uno o múltiples destinos
