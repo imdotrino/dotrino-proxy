@@ -46,6 +46,7 @@ const channelWatchers = new Map();
 // identifique drena la cola completa y se borra (los demás no la verán).
 const pubkeyToTokens = new Map();   // publickey JWK string -> Set<token>
 const tokenToPubkey = new Map();    // token -> publickey JWK string (1:1)
+const tokenToExtraPubkeys = new Map(); // token -> Set<pubkey> (bindings DELEGADOS por cert, p.ej. la maestra M)
 
 // Persistencia durable (SQLite nativo). Solo lo no-efímero: la cola offline y
 // las push subscriptions. Los Maps en RAM son el working set; SQLite el
@@ -241,6 +242,7 @@ function bindPubkey(publickey, token) {
 }
 
 function unbindPubkeyFromToken(token) {
+    unbindExtraPubkeys(token);
     const pk = tokenToPubkey.get(token);
     if (!pk) return;
     tokenToPubkey.delete(token);
@@ -249,6 +251,43 @@ function unbindPubkeyFromToken(token) {
         set.delete(token);
         if (set.size === 0) pubkeyToTokens.delete(pk);
     }
+}
+
+// "Una identidad": además de su pubkey D, una conexión puede quedar bound a la pubkey
+// MAESTRA M si presenta un cert válido (D delegado por M). Así los mensajes dirigidos a
+// M llegan a este dispositivo. La privada de M NUNCA interviene (el cert es offline-verificable).
+function bindExtraPubkey(publickey, token) {
+    if (!pubkeyToTokens.has(publickey)) pubkeyToTokens.set(publickey, new Set());
+    pubkeyToTokens.get(publickey).add(token);
+    if (!tokenToExtraPubkeys.has(token)) tokenToExtraPubkeys.set(token, new Set());
+    tokenToExtraPubkeys.get(token).add(publickey);
+}
+
+function unbindExtraPubkeys(token) {
+    const set = tokenToExtraPubkeys.get(token);
+    if (!set) return;
+    for (const pk of set) {
+        const s = pubkeyToTokens.get(pk);
+        if (s) { s.delete(token); if (s.size === 0) pubkeyToTokens.delete(pk); }
+    }
+    tokenToExtraPubkeys.delete(token);
+}
+
+// Verifica un cert de delegación (D delegado por M). Devuelve M (cert.iss) si es válido y
+// delega EXACTAMENTE a `deviceJwkStr`, o null. Reusa la verificación de firma del proxy
+// (mismo canónico que @dotrino/identity). NO chequea revocación: esa lista vive en el vault
+// y el cert caduca solo (tope 30d) → un cert revocado-pero-vigente solo enrutaría a M hasta exp.
+function verifyDeviceCert(cert, deviceJwkStr) {
+    if (!cert || typeof cert !== 'object') return null;
+    const { v, iss, sub, scope, iat, exp, nonce, sig } = cert;
+    if (v !== 1 || typeof iss !== 'string' || typeof sub !== 'string' || typeof sig !== 'string') return null;
+    if (sub !== deviceJwkStr) return null;            // el cert es para ESTE dispositivo
+    if (typeof iat !== 'number' || typeof exp !== 'number') return null;
+    const now = Date.now();
+    if (now > exp || now < iat - 5 * 60 * 1000) return null;   // vigente
+    let issJwk; try { issJwk = JSON.parse(iss); } catch { return null; }
+    if (!verifySignatureWithJWK({ v, iss, sub, scope, iat, exp, nonce }, sig, issJwk)) return null;  // firmado por M
+    return iss;
 }
 
 // ----- Web Push ("timbre" para destinatarios offline) --------------------
@@ -1550,8 +1589,23 @@ wss.on('connection', (ws, req) => {
             // (persistente con TTL), para encolar sus mensajes federados offline.
             registerHome(data.publickey);
 
+            // "Una identidad": si el cliente presenta un CERT que delega ESTA pubkey D desde
+            // una maestra M, registramos el token TAMBIÉN bajo M → los mensajes a M llegan a
+            // este dispositivo (sin la privada de M). Aditivo: sin cert, idéntico a antes.
+            unbindExtraPubkeys(ws.token);
+            let masterDelivered = 0;
+            let masterBound = null;
+            const master = verifyDeviceCert(message.cert, data.publickey);
+            if (master && master !== data.publickey) {
+                const masterWasFirst = !pubkeyToTokens.has(master) || pubkeyToTokens.get(master).size === 0;
+                bindExtraPubkey(master, ws.token);
+                registerHome(master);
+                masterBound = master;
+                if (masterWasFirst) masterDelivered = flushOfflineFor(master, ws);
+            }
+
             const delivered = wasFirstInstance ? flushOfflineFor(data.publickey, ws) : 0;
-            const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered };
+            const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered, master: masterBound };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
         } catch (e) {
