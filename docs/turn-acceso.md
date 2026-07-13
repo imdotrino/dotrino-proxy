@@ -78,6 +78,38 @@ social/temporal, no código: el operador y la gente que avala emiten atestacione
 firmadas y la confianza se propaga) y **cablear el proxy** (consulta de reputación
 anclada en la raíz + cache + umbral configurable). No urge sin tráfico.
 
+## Solo UN lado necesita credenciales (el confiable "patrocina" la conexión)
+
+Propiedad de ICE/TURN que encaja perfecto con el modelo de reputación: **basta
+con que UNA de las dos partes tenga credenciales TURN para que la conexión
+funcione en ambas direcciones**, sin importar quién inicia la llamada.
+
+Cómo: cada peer recolecta sus candidatos con su propia config. El peer con
+credenciales (A, el confiable) **se reserva un relay** en el TURN server; ese
+relay le llega al otro peer (B) por la señalización como una dirección pública
+más, y B le habla **sin credencial ninguna**. El TURN server solo reenvía
+tráfico de quien A autorizó (los permisos los crea A vía los checks de ICE, y
+son por IP, así que funciona incluso con B detrás de NAT simétrico — el caso
+duro). El tráfico de ida y vuelta viaja por la reserva de A y muere con su TTL.
+
+Consecuencias para el modelo:
+
+- **A patrocina la conexión**: pasa el gate de reputación, abre el relay, y B
+  (anónimo, nuevo, sin avales) conversa con él igual. El contenido llega a
+  cualquiera; el subsidio del operador solo se otorga *a través de* alguien de
+  confianza.
+- **NUNCA se le envían credenciales a B** — y no hay que hacerlo: con
+  credenciales, B podría reservarse su propio relay y usarlo para tráfico
+  arbitrario durante el TTL. No enviarlas no es una limitación: es la
+  contención del modelo. B solo puede usar el relay de A para hablar con A.
+- **El costo queda atado a la identidad confiable**: todo el tráfico de esa
+  conexión se factura contra la reserva de A → la reputación de A "responde"
+  por el consumo.
+
+En el cliente esto ya sale gratis: `enableTurn()` solo inyecta los ICE servers
+en el peer que lo llama; el de enfrente sigue STUN-only y la negociación mezcla
+los candidatos de ambos.
+
 ## Federación: cada operador ancla en SU raíz
 
 Este modelo es **el mismo para cualquier operador**, no un privilegio de Dotrino.
