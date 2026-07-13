@@ -1,6 +1,11 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
+// SQLite en memoria por proceso: los archivos de test corren en paralelo y
+// compartir ./proxy-data.db (o pisarlo con el dev server vivo) da
+// "database is locked". Debe setearse ANTES de requerir server.js
+// (persist.init corre al cargar el módulo).
+process.env.PROXY_DB_FILE = ':memory:';
 const { start, stop } = require('../server');
 
 export async function startTestServer() {
@@ -143,15 +148,34 @@ function buildClient(ws, getToken, recv, waiters) {
  * Usa una firma con prefijo MOCK- que el servidor acepta vía validateSignatureBasic
  * (path de fallback para desarrollo). Para tests no necesitamos criptografía real.
  */
+// Firma REAL (ECDSA P-256 ieee-p1363 sobre JSON canónico): desde el fix de
+// verificación estricta el servidor rechaza firmas de mentira, así que los
+// tests firman con una llave efímera generada por proceso.
+const { generateKeyPairSync, sign: signSync } = require('crypto');
+const _chanKeys = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const _chanPubJwk = _chanKeys.publicKey.export({ format: 'jwk' });
+export const TEST_CHANNEL_PUBKEY = JSON.stringify({
+    kty: 'EC', crv: 'P-256', x: _chanPubJwk.x, y: _chanPubJwk.y
+});
+
+function canonicalStringify(obj) {
+    if (typeof obj !== 'object' || obj === null) return JSON.stringify(obj);
+    if (Array.isArray(obj)) return '[' + obj.map(canonicalStringify).join(',') + ']';
+    const keys = Object.keys(obj).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalStringify(obj[k])).join(',') + '}';
+}
+
+export function signEnvelope(data) {
+    return signSync(
+        'sha256',
+        Buffer.from(canonicalStringify(data), 'utf8'),
+        { key: _chanKeys.privateKey, dsaEncoding: 'ieee-p1363' }
+    ).toString('base64');
+}
+
 export function makeMockChannel(name, extraData = {}) {
-    return {
-        data: {
-            name,
-            publickey: `mock-pubkey-${name}`,
-            ...extraData
-        },
-        signature: 'MOCK-' + 'A'.repeat(20)
-    };
+    const data = { name, publickey: TEST_CHANNEL_PUBKEY, ...extraData };
+    return { data, signature: signEnvelope(data) };
 }
 
 export function sleep(ms) {

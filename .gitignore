@@ -8,3 +8,6 @@ usage-stats.json
 dist
 build
 .DS_Store
+
+# Identidad de servicio del vault (llave privada + cert) — JAMAS commitear
+vault-service/

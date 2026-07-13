@@ -25,6 +25,9 @@ const DEFAULT_LIMITS = {
   list_channels:  { burst: 30,  ratePerSec: 8 },
   channel_count:  { burst: 200, ratePerSec: 50 },
   disconnect:     { burst: 20,  ratePerSec: 5 },
+  // Emisión de credenciales TURN: pocas por conexión (además hay cuota
+  // por pubkey/hora dentro de turnCredentials.js). Env: RATE_LIMIT_TURN-CREDENTIALS_*
+  'turn-credentials': { burst: 10, ratePerSec: 0.5 },
   __global__:     { burst: 300, ratePerSec: 120 }
 };
 

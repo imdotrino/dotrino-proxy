@@ -3,7 +3,8 @@ import {
     startTestServer,
     stopTestServer,
     connectClient,
-    makeMockChannel
+    makeMockChannel,
+    TEST_CHANNEL_PUBKEY
 } from './helpers.mjs';
 
 describe('channels: publish / unpublish / list / channel_count', () => {
@@ -40,7 +41,7 @@ describe('channels: publish / unpublish / list / channel_count', () => {
             expect(res.channel).toBe('room-pub-ok');
             expect(res.data).toMatchObject({
                 name: 'room-pub-ok',
-                publickey: 'mock-pubkey-room-pub-ok'
+                publickey: TEST_CHANNEL_PUBKEY
             });
         });
 

@@ -4,6 +4,7 @@ const WebSocket = require('ws');
 const tokenManager = require('./tokenManager');
 const { createRateLimiter } = require('./rateLimiter');
 const { createUsageStats } = require('./usageStats');
+const { createTurnIssuer } = require('./turnCredentials');
 const usageStats = createUsageStats();
 const crypto = require('crypto');
 
@@ -986,6 +987,34 @@ const wss = new WebSocket.Server({ server });
 // Rate limiter (puede ser noop si RATE_LIMIT_DISABLED=1)
 let rateLimiter = createRateLimiter();
 
+// Credenciales TURN temporales (Cloudflare). Las llaves llegan del VAULT del
+// ecosistema si el proxy está enrolado (ver vaultSecrets.js); el .env directo
+// (TURN_KEY_ID/TURN_KEY_API_TOKEN) queda como fallback para self-hosters.
+// Sin llaves: enabled:false (los clientes quedan STUN-only).
+let turnIssuer = createTurnIssuer();
+let vaultSecretsHandle = null;
+
+// El proxy es transporte puro (sin secretos en su core): arranca SIEMPRE, y la
+// única feature con secretos (TURN) espera al vault. Reintenta para siempre.
+function startVaultSecretsLoop(log = console.log) {
+    const { startVaultSecrets } = require('./vaultSecrets');
+    vaultSecretsHandle = startVaultSecrets({
+        log,
+        onSecrets: (s) => {
+            if (s.TURN_KEY_ID && s.TURN_KEY_API_TOKEN) {
+                if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
+                turnIssuer = createTurnIssuer({ keyId: s.TURN_KEY_ID, apiToken: s.TURN_KEY_API_TOKEN });
+                log('[turn] llaves de Cloudflare cargadas desde el vault: TURN habilitado');
+            } else {
+                log('[vault] secretos recibidos sin TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN sigue apagado');
+            }
+        }
+    });
+    if (vaultSecretsHandle.enabled) {
+        log('[vault] proxy enrolado: esperando los secretos del vault (el transporte ya corre)');
+    }
+}
+
 wss.on('connection', (ws, req) => {
     // Obtener IP del cliente
     const clientIp = req.socket.remoteAddress || '0.0.0.0';
@@ -1113,6 +1142,9 @@ wss.on('connection', (ws, req) => {
                 return;
             } else if (message.type === 'push-unsubscribe') {
                 handlePushUnsubscribeMessage(ws, message);
+                return;
+            } else if (message.type === 'turn-credentials') {
+                handleTurnCredentialsMessage(ws, message);
                 return;
             } else if (message.type === 'push-config') {
                 const response = {
@@ -1725,6 +1757,55 @@ wss.on('connection', (ws, req) => {
         return data;
     }
 
+    // Credenciales TURN temporales (Cloudflare) para WebRTC. Solo para
+    // conexiones YA identificadas con esa misma pubkey: la firma del sobre
+    // prueba la identidad, y el bind pubkey↔token evita re-jugar un sobre
+    // ajeno desde otro socket. El TTL corto + cuota por pubkey/hora evitan
+    // que las credenciales se farmeen para tráfico ajeno al ecosistema.
+    //   data: { op:'turn-credentials', publickey, ts }
+    async function handleTurnCredentialsMessage(ws, message) {
+        try {
+            const data = verifySignedOp(ws, message, 'turn-credentials');
+            if (!data) return;
+            const boundPubkey = tokenToPubkey.get(ws.token);
+            if (boundPubkey !== data.publickey) {
+                const e = { type: 'error', error: 'turn-credentials requiere identify previo con esa pubkey' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            if (!turnIssuer.enabled) {
+                const response = { type: 'turn-credentials', enabled: false };
+                applyMessageIds(response, message);
+                ws.send(JSON.stringify(response));
+                return;
+            }
+            const result = await turnIssuer.issue(data.publickey);
+            if (result.limited) {
+                const e = {
+                    type: 'error',
+                    error: 'turn-credentials: cuota por hora alcanzada',
+                    retry_after_ms: result.retry_after_ms
+                };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            const response = {
+                type: 'turn-credentials',
+                enabled: true,
+                iceServers: result.iceServers,
+                expiresAt: result.expiresAt,
+                ttl: result.ttl
+            };
+            applyMessageIds(response, message);
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+        } catch (e) {
+            console.error('handleTurnCredentialsMessage error:', e.message);
+            try {
+                const errorResponse = { type: 'error', error: 'turn-credentials: error emitiendo credenciales' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+            } catch (_) {}
+        }
+    }
+
     // Programar un push a la PROPIA pubkey. data.spec = JSON string con
     // { fireAt?:ms (one-shot) | cron?:string + tz?:string, payload?:object }.
     function handleSchedulePushMessage(ws, message) {
@@ -1973,6 +2054,9 @@ function start(port = Number(PORT)) {
                 console.log(`=========================================`);
                 console.log(`⏰ ${new Date().toLocaleString()}`);
                 console.log(`=========================================`);
+                // Secretos del vault (TURN): DESPUÉS de escuchar — el transporte
+                // nunca espera al vault; solo la feature. En tests no aplica.
+                try { startVaultSecretsLoop(); } catch (e) { console.error('[vault] no se pudo iniciar la carga de secretos:', e.message); }
             }
             resolve(actualPort);
         });
@@ -2020,6 +2104,12 @@ function stop() {
     }
     rateLimiter = createRateLimiter();
 
+    // Reset del emisor TURN (limpia cache/cuotas; releé el .env)
+    if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
+    turnIssuer = createTurnIssuer();
+    if (vaultSecretsHandle && typeof vaultSecretsHandle.stop === 'function') vaultSecretsHandle.stop();
+    vaultSecretsHandle = null;
+
     return new Promise((resolve) => {
         wss.close(() => {
             server.close(() => resolve());
@@ -2050,7 +2140,13 @@ function setRateLimiter(newLimiter) {
 
 function getRateLimiter() { return rateLimiter; }
 
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter };
+/** Reemplazar el emisor TURN activo (utilidad para tests con fetch mockeado). */
+function setTurnIssuer(newIssuer) {
+    if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
+    turnIssuer = newIssuer;
+}
+
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el

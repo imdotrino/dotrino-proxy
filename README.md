@@ -21,6 +21,7 @@ Un servidor WebSocket proxy que implementa las 4 reglas especificadas en `defini
 - **Web Push ("timbre")**: si una pubkey offline tiene una push subscription registrada, además de encolar el proxy envía un Web Push **sin contenido** (VAPID, estándar, sin SDK de Firebase) que despierta al Service Worker del destinatario para que reconecte y baje su cola. Ver `enablePush()` en `@dotrino/proxy-client`.
 - **Push programado (auto-recordatorios)**: una pubkey puede programar pushes **a sí misma** (one-shot por timestamp o recurrente por `cron`+`tz`, vía `cron-parser`). Self-only (sobre firmado por el vault, target = firmante) → sin vector de spam. Un loop dispara los jobs vencidos. Catch-up "descartar lo vencido": no dispara jobs que vencieron mientras el proxy estuvo caído. Persistido en SQLite (`scheduled_pushes`). Ver `schedulePush()` en el cliente. Tick configurable con `SCHED_TICK_MS`.
 - **Rate limit de dos niveles** por (token, type): soft → `abuse_notice` a los receptores, hard → cierre de conexión + ban de IP 30 min.
+- **Credenciales TURN temporales (`turn-credentials`)**: el proxy administra el TURN de Cloudflare para WebRTC. La llave de Cloudflare vive solo en el servidor; a los clientes se les emiten credenciales **efímeras** (TTL default 10 min), solo en conexiones **identificadas** (sobre firmado por el vault + bind pubkey↔token previo), con cache por pubkey y cuota por pubkey/hora. Así el relay solo lo usan apps Dotrino y no tráfico arbitrario. Apagado si faltan `TURN_KEY_ID`/`TURN_KEY_API_TOKEN` (los clientes caen a STUN-only). Ver `enableTurn()` en `@dotrino/proxy-client`.
 - **Persistencia durable (SQLite nativo)**: la cola offline y las push subscriptions se respaldan en SQLite (`node:sqlite`, write-through) y se rehidratan al arrancar. Los mapas token↔pubkey y los canales siguen siendo efímeros (RAM), por diseño.
 
 ## Instalación
@@ -38,8 +39,38 @@ cp .env.example .env   # luego completá las claves VAPID
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | Par VAPID para Web Push. **Opcional**: si faltan, el proxy autogenera un par la primera vez y lo persiste en SQLite (estable entre reinicios). Definilas solo para control explícito o para compartir el par entre varias instancias. Generar manualmente: `node -e "console.log(require('web-push').generateVAPIDKeys())"`. |
 | `VAPID_SUBJECT` | Contacto para el header VAPID (`mailto:` o `https:`). |
 | `PROXY_DB_FILE` | Archivo SQLite de persistencia durable (default `./proxy-data.db`). |
+| `TURN_KEY_ID` / `TURN_KEY_API_TOKEN` | TURN key de Cloudflare Realtime (dashboard → Realtime → TURN). **Fallback para self-hosters**: el camino oficial es el **vault** (ver abajo). Sin llaves (ni vault) la op `turn-credentials` responde `enabled:false` y los clientes quedan STUN-only. |
+| `TURN_TTL_SECONDS` | Vida de cada credencial TURN emitida (default 600, rango 60–86400). |
+| `TURN_MAX_PER_HOUR` | Emisiones de credenciales por pubkey/hora (default 12). |
+| `VAULT_SERVICE_DIR` | Dónde vive la identidad de servicio del proxy para leer secretos del vault (default `./vault-service`). |
 
 > **Requiere Node ≥ 22.5** por el módulo nativo `node:sqlite`.
+
+### Secretos desde el vault (camino oficial)
+
+El proxy es **transporte puro**: su core no usa secretos de terceros y arranca
+siempre. Lo que sí los usa (TURN) los obtiene del **vault del ecosistema**
+(`dotrino-vault`) como un **cliente identificado** más — la llave de Cloudflare
+no vive en el `.env` del VPS. La respuesta viaja **sellada** (el propio proxy
+que la transporta no puede leerla) y **firmada** por la maestra del vault.
+Si el vault no está disponible, TURN queda `enabled:false` y el proxy reintenta
+para siempre (regla del ecosistema: la feature espera al vault).
+
+Enrolamiento (una vez):
+
+```bash
+# En el PC del vault:
+dotrino-vault pair --service proxy          # imprime QR + payload JSON
+dotrino-vault secret set proxy TURN_KEY_ID <id>
+dotrino-vault secret set proxy TURN_KEY_API_TOKEN <token>
+
+# En el host del proxy:
+node enroll-vault.js '<payload JSON del QR>'   # imprime un código
+# En el PC del vault:
+dotrino-vault approve <código>
+
+# Reiniciar el proxy: al arrancar detecta ./vault-service/ y pide sus secretos.
+```
 
 ## Uso
 

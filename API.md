@@ -317,6 +317,42 @@ Cuando un cliente se desconecta, el servidor emite el evento `disconnected` a:
 
 La desconexión manual vía `{type:"disconnect", target}` solo emite la forma sin `channel` a las dos partes del par, ya que se trata de cortar un par específico, no de cerrar la conexión completa.
 
+### Credenciales TURN temporales (`turn-credentials`)
+
+Emite credenciales TURN efímeras (Cloudflare) para WebRTC. Requiere un sobre
+firmado por el vault (mismo esquema que `identify`) **y** que la conexión ya
+esté identificada con esa misma pubkey. Cuota por pubkey/hora + rate limit por
+conexión; la credencial expira sola (`TURN_TTL_SECONDS`, default 600 s).
+
+**Enviar:**
+```json
+{
+  "type": "turn-credentials",
+  "data": { "op": "turn-credentials", "publickey": "<JWK string>", "ts": 1750000000000 },
+  "signature": "<base64 ECDSA P-256 ieee-p1363 del JSON canónico de data>",
+  "id": "req_1"
+}
+```
+
+**Respuesta (proxy con TURN configurado):**
+```json
+{
+  "type": "turn-credentials",
+  "enabled": true,
+  "iceServers": [
+    { "urls": ["stun:stun.cloudflare.com:3478", "turn:turn.cloudflare.com:3478?transport=udp"],
+      "username": "...", "credential": "..." }
+  ],
+  "expiresAt": 1750000600000,
+  "ttl": 600,
+  "id": "req_1"
+}
+```
+
+**Respuesta (proxy sin TURN):** `{ "type": "turn-credentials", "enabled": false }`.
+**Errores:** sin `identify` previo, firma inválida, o `retry_after_ms` si se
+alcanzó la cuota por hora.
+
 ### Errores
 ```json
 {
