@@ -42,6 +42,9 @@ cp .env.example .env   # luego completá las claves VAPID
 | `TURN_KEY_ID` / `TURN_KEY_API_TOKEN` | TURN key de Cloudflare Realtime (dashboard → Realtime → TURN). **Fallback para self-hosters**: el camino oficial es el **vault** (ver abajo). Sin llaves (ni vault) la op `turn-credentials` responde `enabled:false` y los clientes quedan STUN-only. |
 | `TURN_TTL_SECONDS` | Vida de cada credencial TURN emitida (default 600, rango 60–86400). |
 | `TURN_MAX_PER_HOUR` | Emisiones de credenciales por pubkey/hora (default 12). |
+| `TURN_GLOBAL_MAX_PER_HOUR` | Techo GLOBAL de emisiones reales a Cloudflare/hora sumando todas las pubkeys (default 2000). Protege la cuenta de Cloudflare aunque un atacante rote pubkeys autofirmadas. |
+| `TURN_MAX_TRACKED` | Tope de pubkeys distintas retenidas en memoria (default 50000); barrido periódico + evicción oldest-first. |
+| `TURN_FETCH_TIMEOUT_MS` | Timeout del fetch a Cloudflare (default 10000). |
 | `VAULT_SERVICE_DIR` | Dónde vive la identidad de servicio del proxy para leer secretos del vault (default `./vault-service`). |
 
 > **Requiere Node ≥ 22.5** por el módulo nativo `node:sqlite`.

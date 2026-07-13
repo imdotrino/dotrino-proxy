@@ -16,7 +16,7 @@
     "dotenv": "^16.0.0",
     "web-push": "^3.6.7",
     "ws": "^8.14.2",
-    "@dotrino/vault": "0.2.0",
+    "@dotrino/vault": "0.2.1",
     "@dotrino/identity": "0.20.0",
     "@dotrino/proxy-client": "0.7.0"
   },

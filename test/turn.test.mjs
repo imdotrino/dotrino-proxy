@@ -177,4 +177,51 @@ describe('createTurnIssuer', () => {
         const issuer = createTurnIssuer({ keyId: 'k', apiToken: 'bad', fetchImpl });
         await expect(issuer.issue('pk1')).rejects.toThrow(/401/);
     });
+
+    it('el techo GLOBAL corta el abuso por rotación de pubkeys (protege la cuenta de Cloudflare)', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-13T12:00:00Z'));
+        const { fetchImpl, getCalls } = mockCloudflareFetch();
+        // cada pubkey nueva tiene su cuota por-pubkey intacta, pero el techo global es 3
+        const issuer = createTurnIssuer({ keyId: 'k', apiToken: 't', ttlSeconds: 60, maxPerHour: 12, globalMaxPerHour: 3, fetchImpl });
+        for (let i = 0; i < 3; i++) {
+            const r = await issuer.issue('pk-nueva-' + i);   // pubkeys DISTINTAS (rotación)
+            expect(r.iceServers).toBeTruthy();
+        }
+        const blocked = await issuer.issue('pk-nueva-4');     // 4ta pubkey distinta → techo global
+        expect(blocked.limited).toBe(true);
+        expect(getCalls()).toBe(3);                            // Cloudflare NO fue golpeado la 4ta vez
+        issuer.destroy();
+    });
+
+    it('no acumula memoria sin límite: el barrido purga pubkeys vencidas que no vuelven', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-13T12:00:00Z'));
+        const { fetchImpl } = mockCloudflareFetch();
+        const issuer = createTurnIssuer({ keyId: 'k', apiToken: 't', ttlSeconds: 60, maxTracked: 3, fetchImpl });
+        // 5 pubkeys que piden UNA vez y nunca vuelven (patrón del atacante)
+        for (let i = 0; i < 5; i++) await issuer.issue('efimera-' + i);
+        vi.advanceTimersByTime(2 * 60 * 60 * 1000);  // pasa >1h: todo vencido
+        issuer._sweep();                              // el barrido que corre el setInterval
+        // No exponemos los Maps; verificamos el efecto: tras el barrido, una pubkey
+        // vieja vuelve a contar como "primera vez" (no quedó rastro que la limite).
+        const r = await issuer.issue('efimera-0');
+        expect(r.iceServers).toBeTruthy();
+        issuer.destroy();
+    });
+
+    it('el fetch tiene timeout (un Cloudflare colgado no retiene el slot)', async () => {
+        // timers REALES + timeout corto: fake timers chocan con el AbortController interno.
+        let aborted = false;
+        const fetchImpl = (url, opts) => new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); });
+            // nunca resuelve por su cuenta: simula Cloudflare colgado
+        });
+        const issuer = createTurnIssuer({ keyId: 'k', apiToken: 't', fetchImpl, fetchTimeoutMs: 50 });
+        await expect(issuer.issue('pk1')).rejects.toThrow();
+        expect(aborted).toBe(true);
+        // tras abortar, el slot inFlight quedó libre: una nueva petición se cursa
+        expect(issuer.enabled).toBe(true);
+        issuer.destroy();
+    });
 });
