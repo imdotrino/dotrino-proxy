@@ -291,6 +291,26 @@ function verifyDeviceCert(cert, deviceJwkStr) {
     return iss;
 }
 
+// "Un perfil, muchas llaves": el ACTA DE PERFIL dice qué llaves son de la misma persona.
+// Si el cliente la presenta al identificarse, este proxy la verifica (va firmada por quien
+// la selló) y registra el token TAMBIÉN bajo el `profileId` → escribirle a la PERSONA llega
+// a cualquiera de sus dispositivos, sin que ninguna llave privada intervenga.
+//
+// El proxy no decide nada de política: solo comprueba que el acta esté bien firmada y que
+// quien se identifica sea miembro. Si mienten, lo peor que consiguen es enrutarse mensajes
+// a sí mismos. Ver `dotrino-vault/docs/acta-de-perfil.md`.
+function verifyActaMembership(acta, deviceJwkStr) {
+    if (!acta || typeof acta !== 'object' || acta.v !== 1) return null;
+    const { profileId, sealer, sealedBy, members, sig } = acta;
+    if (typeof profileId !== 'string' || typeof sealer !== 'string' || typeof sealedBy !== 'string') return null;
+    if (typeof sig !== 'string' || !Array.isArray(members)) return null;
+    if (!members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
+    let sealerJwk; try { sealerJwk = JSON.parse(sealedBy); } catch { return null; }
+    const { sig: _omit, ...body } = acta;
+    if (!verifySignatureWithJWK(body, sig, sealerJwk)) return null;     // firmada por quien dice
+    return profileId;
+}
+
 // ----- Web Push ("timbre" para destinatarios offline) --------------------
 //
 // Cuando un mensaje cae a la cola offline, además de encolarlo enviamos un
@@ -1636,8 +1656,23 @@ wss.on('connection', (ws, req) => {
                 if (masterWasFirst) masterDelivered = flushOfflineFor(master, ws);
             }
 
+            // Acta de perfil: bindea también el `profileId` (la PERSONA), de modo que un
+            // mensaje dirigido a ella llegue a cualquiera de sus dispositivos conectados.
+            let profileBound = null;
+            let profileDelivered = 0;
+            const profileId = verifyActaMembership(message.acta, data.publickey);
+            if (profileId && profileId !== data.publickey && profileId !== masterBound) {
+                const profileWasFirst = !pubkeyToTokens.has(profileId) || pubkeyToTokens.get(profileId).size === 0;
+                bindExtraPubkey(profileId, ws.token);
+                registerHome(profileId);
+                profileBound = profileId;
+                if (profileWasFirst) profileDelivered = flushOfflineFor(profileId, ws);
+            } else if (profileId) {
+                profileBound = profileId;
+            }
+
             const delivered = wasFirstInstance ? flushOfflineFor(data.publickey, ws) : 0;
-            const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered, master: masterBound };
+            const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered + profileDelivered, master: masterBound, profile: profileBound };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
         } catch (e) {
