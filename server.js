@@ -306,7 +306,10 @@ function verifyActaMembership(acta, deviceJwkStr) {
     if (typeof sig !== 'string' || !Array.isArray(members)) return null;
     if (!members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
     let sealerJwk; try { sealerJwk = JSON.parse(sealedBy); } catch { return null; }
-    const { sig: _omit, ...body } = acta;
+    // El cuerpo firmado es el acta SIN `sig` y SIN `card` — tiene que coincidir exactamente
+    // con `actaBody()` de @dotrino/identity/acta, que es quien la firma. La tarjeta va aparte
+    // porque lleva su propia firma y se comparte sola.
+    const { sig: _omit, card: _card, ...body } = acta;
     if (!verifySignatureWithJWK(body, sig, sealerJwk)) return null;     // firmada por quien dice
     return profileId;
 }
