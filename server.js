@@ -75,6 +75,9 @@ const { serviceDir } = require('./vaultSecrets');
 let nodeIdentity = null;
 try { nodeIdentity = nodeIdentityLib.loadNodeIdentity(serviceDir()); }
 catch (e) { console.error('[fed] identidad de nodo inválida:', e.message); }
+// Las instancias que emite este nodo llevan su prefijo delante: es lo que las
+// hace únicas en todo el ecosistema y ruteables sin preguntarle a nadie.
+tokenManager.setNodePrefix(nodeIdentity && nodeIdentity.prefix);
 const peerRegistry = new PeerRegistry({
     urls: PROXY_PEERS, identity: nodeIdentity, persist, log: (...a) => console.log(...a)
 });
@@ -95,8 +98,126 @@ const mesh = new Mesh({
             if (typeof toPubkey !== 'string' || message === undefined) return;
             deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true);
         } catch (e) { console.warn('[mesh] entrega federada falló:', e.message); }
+    },
+    // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
+    onRelay: (payload, link) => {
+        try { deliverRelayed(payload, link); }
+        catch (e) { console.warn('[mesh] relay falló:', e.message); }
+    },
+    // Un peer nos avisa que una instancia suya, con la que teníamos par, se fue.
+    onPeerGone: (payload) => {
+        try { handleRemotePeerGone(payload); }
+        catch (e) { console.warn('[mesh] peer-gone falló:', e.message); }
+    },
+    // Un peer nos pide canjear una cita que emitimos NOSOTROS.
+    onPairRedeem: (payload, link) => {
+        try {
+            const { rid, code } = payload || {};
+            const r = pairingCodes.redeem(code);
+            link.send('pair-result', r.error
+                ? { rid, ok: false, error: r.error }
+                : { rid, ok: true, instance: r.instance, publickey: r.pubkey || null },
+            { retain: false });
+        } catch (e) { console.warn('[mesh] pair-redeem falló:', e.message); }
+    },
+    // El nodo dueño nos contesta el canje que le pedimos.
+    onPairResult: (payload) => {
+        try {
+            const { rid } = payload || {};
+            const pending = pendingRedeems.get(rid);
+            if (!pending) return;   // ya venció el timeout
+            clearTimeout(pending.timer);
+            pendingRedeems.delete(rid);
+            const response = payload.ok
+                ? { type: 'pair-redeem', ok: true, instance: payload.instance, publickey: payload.publickey || null }
+                : { type: 'pair-redeem', ok: false, error: payload.error || 'canje rechazado' };
+            applyMessageIds(response, pending.message);
+            try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
+        } catch (e) { console.warn('[mesh] pair-result falló:', e.message); }
     }
 });
+
+// Citas de emparejamiento: el código corto que ve un humano. Ver pairingCodes.js.
+const { PairingCodes } = require('./pairingCodes');
+const pairingCodes = new PairingCodes();
+
+// Canjes de cita esperando respuesta del nodo dueño: id -> {ws, message, timer}
+const pendingRedeems = new Map();
+let redeemSeq = 0;
+
+// Instancias REMOTAS con las que alguna conexión local tiene par:
+// instance remota -> pubkey del nodo dueño. Sirve para avisar la baja al nodo
+// correcto cuando se corta de este lado, sin tener que recorrer la malla entera.
+const remoteInstances = new Map();
+
+/**
+ * Entrega un mensaje que un peer relayó hacia una instancia NUESTRA.
+ * Es la contraparte del ruteo por prefijo: el nodo dueño es el único que puede
+ * resolver la instancia, y también el que registra el par de este lado.
+ */
+function deliverRelayed(payload, link) {
+    const { toInstance, fromInstance, fromPubkey, message } = payload || {};
+    if (typeof toInstance !== 'string' || message === undefined) return { failed: true };
+    const conn = activeConnections.get(toInstance);
+    if (!conn) return { failed: true };
+    try {
+        conn.ws.send(JSON.stringify({
+            type: 'message',
+            from: fromInstance || null,
+            from_publickey: fromPubkey || null,
+            message
+        }));
+    } catch (_) { return { failed: true }; }
+    if (fromInstance) {
+        connectionPairs.add(createPairKey(toInstance, fromInstance));
+        const owner = ownerNodeOf(fromInstance);
+        if (owner) remoteInstances.set(fromInstance, owner.pubkey);
+    }
+    return { delivered: true };
+}
+
+/**
+ * Un peer avisa que una instancia SUYA se desconectó. Se notifica a las
+ * conexiones locales que tenían par con ella y se limpia el par.
+ *
+ * Sin esto, un corte del otro lado dejaba fantasmas para siempre: la app seguía
+ * mostrando al otro conectado, WebRTC no cerraba su peer y el lobby no liberaba
+ * el asiento.
+ */
+function handleRemotePeerGone(payload) {
+    const gone = payload && payload.instance;
+    if (typeof gone !== 'string') return;
+    notifyPairedClients(gone);
+    remoteInstances.delete(gone);
+}
+
+/**
+ * Al cerrarse una conexión local, avisa a los nodos que tienen instancias
+ * pareadas con ella. Un aviso por nodo, no uno por par.
+ */
+function notifyRemotePeersOfDisconnect(instance) {
+    if (!mesh.hasLinks()) return 0;
+    const nodes = new Set();
+    for (const pairKey of connectionPairs) {
+        const [t1, t2] = pairKey.split(':');
+        if (t1 !== instance && t2 !== instance) continue;
+        const other = t1 === instance ? t2 : t1;
+        const nodePubkey = remoteInstances.get(other);
+        if (nodePubkey) nodes.add(nodePubkey);
+    }
+    for (const nodePubkey of nodes) {
+        mesh.sendTo(nodePubkey, 'peer-gone', { instance });
+    }
+    return nodes.size;
+}
+
+/** ¿A qué nodo pertenece esta instancia? null = a este (o no se sabe). */
+function ownerNodeOf(instance) {
+    if (!nodeIdentity || typeof instance !== 'string' || instance.length <= nodeIdentityLib.PREFIX_LEN) return null;
+    const prefix = instance.slice(0, nodeIdentityLib.PREFIX_LEN);
+    if (prefix === nodeIdentity.prefix) return null;   // es mía
+    return peerRegistry.byNodePrefix(prefix);          // null si no conozco ese prefijo
+}
 // "Soy el home de estas pubkeys" (identificaron acá). Set en RAM + respaldo SQLite.
 const homePubkeys = new Set(persist.loadHomes(Date.now() - HOME_TTL_MS));
 function registerHome(pubkey) {
@@ -1196,10 +1317,17 @@ wss.on('connection', (ws, req) => {
     // Asociar el token con el WebSocket
     ws.token = token;
     
-    // Enviar información al cliente
+    // Enviar información al cliente.
+    // `instance` es el identificador de ESTA conexión, ya cualificado por nodo:
+    // se puede direccionar desde cualquier proxio de la malla. `token` viaja con
+    // el mismo valor porque es el nombre que usa hoy el cliente; lo que cambió es
+    // el CONTENIDO (ya no es un código de 4 caracteres para leer en voz alta —
+    // para eso está la cita de emparejamiento).
     ws.send(JSON.stringify({
         type: 'connected',
+        instance: token,
         token: token,
+        node: nodeIdentity ? nodeIdentity.prefix : null,
         timestamp: new Date().toISOString()
     }));
     
@@ -1310,6 +1438,12 @@ wss.on('connection', (ws, req) => {
             } else if (message.type === 'list-pushes') {
                 handleListPushesMessage(ws, message);
                 return;
+            } else if (message.type === 'pair-code') {
+                handlePairCodeMessage(ws, message);
+                return;
+            } else if (message.type === 'pair-redeem') {
+                handlePairRedeemMessage(ws, message);
+                return;
             }
             
             // Mensaje regular (to + message) o (to_publickey + message)
@@ -1387,24 +1521,43 @@ wss.on('connection', (ws, req) => {
             const failedTokens = [];
             
             for (const targetToken of targetTokens) {
-                // Verificar que el token destino exista y esté conectado
                 const targetConn = activeConnections.get(targetToken);
+
                 if (!targetConn) {
+                    // No está acá. ¿La instancia dice que es de OTRO nodo? Entonces
+                    // se la mandamos por la malla en vez de declararla fallida.
+                    // Esto es lo que antes no existía: un mensaje dirigido a una
+                    // conexión de otro proxio moría acá mismo, en `failedTokens`.
+                    const owner = ownerNodeOf(targetToken);
+                    if (owner && mesh.relayTo(owner.pubkey, {
+                        toInstance: targetToken,
+                        fromInstance: token,
+                        fromPubkey: tokenToPubkey.get(token) || null,
+                        message: message.message
+                    })) {
+                        // El par se registra en los DOS nodos: acá con la instancia
+                        // remota, y allá al entregar. Así la baja de cualquiera de
+                        // los dos lados avisa al otro.
+                        connectionPairs.add(createPairKey(token, targetToken));
+                        remoteInstances.set(targetToken, owner.pubkey);
+                        sentCount++;
+                        continue;
+                    }
                     failedTokens.push(targetToken);
                     continue;
                 }
-                
+
                 // Enviar el mensaje al destinatario
                 targetConn.ws.send(JSON.stringify({
                     type: 'message',
                     from: token,
                     message: message.message
                 }));
-                
+
                 // Registrar el par de conexión
                 const pairKey = createPairKey(token, targetToken);
                 connectionPairs.add(pairKey);
-                
+
                 sentCount++;
             }
             
@@ -2060,6 +2213,80 @@ wss.on('connection', (ws, req) => {
         }
     }
 
+    // ----- citas de emparejamiento (el código corto que ve un humano) -----
+
+    /** Emite (o renueva) la cita de ESTA conexión. */
+    function handlePairCodeMessage(ws, message) {
+        if (!nodeIdentity) {
+            const e = { type: 'error', error: 'este nodo no puede emitir citas (sin identidad de nodo)' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const res = pairingCodes.create({
+            instance: ws.token,
+            pubkey: tokenToPubkey.get(ws.token) || null,
+            nodePrefix: nodeIdentity.prefix,
+            ttlMs: message.ttlMs
+        });
+        if (!res) {
+            const e = { type: 'error', error: 'no se pudo emitir la cita' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const response = { type: 'pair-code', code: res.code, expiresAt: res.expiresAt, node: nodeIdentity.prefix };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    }
+
+    /**
+     * Canjea una cita y devuelve a quién apunta.
+     *
+     * Si el prefijo dice que la emitió OTRO nodo, se le pregunta a ESE nodo, no a
+     * la malla entera: un pregón se lo queda el primero que conteste, que es
+     * justo cómo un peer hostil intercepta emparejamientos ajenos.
+     */
+    function handlePairRedeemMessage(ws, message) {
+        const raw = message.code;
+        const code = require('./pairingCodes').normalizeCode(raw);
+        if (!code) {
+            const e = { type: 'pair-redeem', ok: false, error: 'código vacío' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const prefix = code.slice(0, nodeIdentityLib.PREFIX_LEN);
+
+        // ¿Es de este nodo?
+        if (!nodeIdentity || prefix === nodeIdentity.prefix) {
+            const r = pairingCodes.redeem(code);
+            const response = r.error
+                ? { type: 'pair-redeem', ok: false, error: r.error }
+                : { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+            return;
+        }
+
+        const owner = peerRegistry.byNodePrefix(prefix);
+        if (!owner) {
+            const e = { type: 'pair-redeem', ok: false, error: 'nodo desconocido para ese código' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const rid = `r${++redeemSeq}`;
+        const timer = setTimeout(() => {
+            const p = pendingRedeems.get(rid);
+            if (!p) return;
+            pendingRedeems.delete(rid);
+            const e = { type: 'pair-redeem', ok: false, error: 'el nodo del código no respondió' };
+            applyMessageIds(e, p.message);
+            try { p.ws.send(JSON.stringify(e)); } catch (_) {}
+        }, 6000);
+        if (timer.unref) timer.unref();
+        pendingRedeems.set(rid, { ws, message, timer });
+        if (!mesh.sendTo(owner.pubkey, 'pair-redeem', { rid, code }, { retain: false })) {
+            clearTimeout(timer);
+            pendingRedeems.delete(rid);
+            const e = { type: 'pair-redeem', ok: false, error: 'sin enlace con el nodo del código' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e));
+        }
+    }
+
     function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
         const senderPubkey = tokenToPubkey.get(ws.token) || null;
         const now = Date.now();
@@ -2169,6 +2396,11 @@ wss.on('connection', (ws, req) => {
             // antes de removeFromAllPublicChannels para que aún estén las entradas.
             const notifiedByChannels = notifyChannelMembersOfDisconnect(token);
 
+            // Avisar la baja a los nodos que tienen conexiones pareadas con esta
+            // instancia. Se hace ANTES de borrar los pares, que es de donde sale
+            // la lista de a quién avisar.
+            notifyRemotePeersOfDisconnect(token);
+
             // Notificar a pares restantes (deduplicando contra los ya notificados por canal)
             const notifiedByPairs = notifyPairedClients(token, notifiedByChannels);
 
@@ -2179,6 +2411,10 @@ wss.on('connection', (ws, req) => {
             // por to_publickey caerán a la cola offline hasta que el cliente
             // se reconecte e identifique de nuevo).
             unbindPubkeyFromToken(token);
+
+            // Soltar la cita de emparejamiento: un código que apunta a una
+            // conexión muerta solo sirve para dar un error confuso al que lo teclea.
+            pairingCodes.release(token);
 
             // Liberar token inmediatamente
             tokenManager.releaseToken(token);
@@ -2217,6 +2453,7 @@ function start(port = Number(PORT)) {
     return new Promise((resolve, reject) => {
         channelCleanupInterval = setInterval(cleanupExpiredChannelEntries, 60 * 1000);
         tokenCleanupInterval = tokenManager.startCleanupInterval(5);
+        pairingCodes.startCleanup();
         offlineQueueInterval = setInterval(cleanupOfflineQueues, 60 * 1000);
         // Push programado: descartar lo vencido al arrancar y luego tick periódico.
         reconcileScheduledPushes();
@@ -2300,6 +2537,7 @@ function stop() {
         tokenCleanupInterval = null;
     }
     peerRegistry.stopRefresh();
+    pairingCodes.stopCleanup();
     mesh.stop();
 
     // Cerrar todas las conexiones de cliente

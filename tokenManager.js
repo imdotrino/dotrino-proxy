@@ -1,15 +1,56 @@
-// Token Manager para el sistema de tokens alfanuméricos cortos
-// Caracteres permitidos: 1-9, A-Z (sin 0 ni letras minúsculas)
+// Identificadores de CONEXIÓN ("instancias").
+//
+// Hasta la fase 4 esto emitía un código de 4 caracteres que hacía dos trabajos a
+// la vez: era la dirección con la que se ruteaba un mensaje Y el código que un
+// humano leía o tecleaba para emparejarse. Esa doble función es la que rompía el
+// ecosistema al haber varios proxios:
+//
+//   - como dirección, 4 caracteres no alcanzan para un espacio GLOBAL (35^4 =
+//     1.500.625, y cada nodo sorteaba sin hablar con los demás → el mismo código
+//     podía estar vivo en dos nodos a la vez, y un mensaje ruteado globalmente se
+//     podía entregar a la persona equivocada);
+//   - como código humano, no podía crecer sin volverse incómodo de dictar.
+//
+// Ahora son dos cosas distintas. Acá vive la primera: la INSTANCIA, que nunca la
+// ve una persona, así que puede ser todo lo larga que haga falta. Lleva delante
+// el PREFIJO DEL NODO que la emitió, con lo cual:
+//   - es única en todo el ecosistema POR CONSTRUCCIÓN (no por probabilidad);
+//   - se rutea leyéndola: el prefijo dice a qué nodo hay que mandarle el mensaje,
+//     sin preguntarle a nadie ni mantener un registro global.
+// El código corto para humanos (la "cita") vive aparte, en pairingCodes.js.
 const crypto = require('crypto');
 
 const ALLOWED_CHARS = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
+// 16 bytes = 128 bits en base64url (22 caracteres). Adivinar una instancia ajena
+// no es un objetivo realista, que es justo lo que no podía decirse de 4 chars.
+const INSTANCE_BYTES = 16;
+
 class TokenManager {
     constructor() {
-        // Mapa de tokens cortos activos: shortToken -> {ws, ip, lastActivity}
+        // Mapa de instancias activas: instance -> {ws, ip, lastActivity}
         this.activeTokens = new Map();
-        // Longitud de los tokens cortos (4 caracteres)
+        // Longitud de los tokens cortos (histórico; ver generateRandomToken)
         this.tokenLength = 4;
+        // Prefijo del nodo (2 caracteres). Lo fija server.js al arrancar, cuando
+        // ya cargó la identidad del nodo. Sin él las instancias no son ruteables
+        // entre nodos, así que se arranca gritando en vez de emitir a ciegas.
+        this.nodePrefix = null;
+    }
+
+    /** Fija el prefijo de nodo que llevarán las instancias emitidas. */
+    setNodePrefix(prefix) {
+        this.nodePrefix = prefix || null;
+    }
+
+    /**
+     * Genera una instancia: `<prefijo de nodo><22 chars base64url>`.
+     * Sin prefijo de nodo (nodo sin identidad) usa `??`, que no rutea a ninguna
+     * parte pero mantiene el formato — el nodo suelto sigue funcionando solo.
+     */
+    generateInstance() {
+        const prefix = this.nodePrefix || '??';
+        return prefix + crypto.randomBytes(INSTANCE_BYTES).toString('base64url');
     }
 
     // Generar un token corto aleatorio de la longitud especificada.
@@ -31,37 +72,19 @@ class TokenManager {
         return this.activeTokens.has(token);
     }
 
-    // Generar un token corto único
+    /**
+     * Genera una instancia libre. Con 128 bits de azar el bucle es una
+     * formalidad, pero se comprueba igual: la versión anterior devolvía a ciegas
+     * un token más largo si los 100 intentos chocaban, y ese token podía repetir
+     * uno ya vivo — `activeConnections.set` sobrescribía la conexión previa en
+     * silencio y su dueño dejaba de recibir sin enterarse.
+     */
     generateUniqueToken() {
-        let attempts = 0;
-        const maxAttempts = 100;
-
-        while (attempts < maxAttempts) {
-            const token = this.generateRandomToken(this.tokenLength);
-
-            if (!this.isTokenInUse(token)) {
-                return token;
-            }
-
-            attempts++;
+        for (let i = 0; i < 10; i++) {
+            const instance = this.generateInstance();
+            if (!this.isTokenInUse(instance)) return instance;
         }
-
-        // Si no se encontró token único, aumentar longitud. La rama larga TAMBIÉN
-        // comprueba unicidad: devolverlo a ciegas podía repetir un token ya vivo y
-        // `activeConnections.set` sobrescribía la conexión previa en silencio (el
-        // dueño del token viejo dejaba de recibir y nadie se enteraba).
-        for (let len = this.tokenLength + 1; len <= this.tokenLength + 4; len++) {
-            for (let i = 0; i < maxAttempts; i++) {
-                const token = this.generateRandomToken(len);
-                if (!this.isTokenInUse(token)) {
-                    console.log(`Aumentando longitud de token a ${len} caracteres temporalmente`);
-                    return token;
-                }
-            }
-        }
-        // Inalcanzable en la práctica (35^8 con el Map lleno); mejor fallar que
-        // devolver un duplicado.
-        throw new Error('No se pudo generar un token único');
+        throw new Error('No se pudo generar una instancia única');
     }
 
     // Asignar un token corto a una conexión

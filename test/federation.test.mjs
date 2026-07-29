@@ -23,14 +23,18 @@ describe('federación entre dos nodos', () => {
         // arrancan a la vez, así que el primero encuentra al otro caído y tiene
         // que reintentar: por eso se espera a que los dos sentidos estén listos,
         // no un tiempo fijo.
+        // Hay que esperar a que el ENLACE esté listo, no solo a que se hayan
+        // pineado: el relay por instancia exige un enlace vivo (no se guarda,
+        // porque un mensaje entre dos conexiones caduca con ellas).
         const deadline = Date.now() + 30000;
         for (;;) {
             const [pa, pb] = await Promise.all([
                 fetch(`${a.http}/peers`).then(r => r.json()).catch(() => ({ peers: [] })),
                 fetch(`${b.http}/peers`).then(r => r.json()).catch(() => ({ peers: [] }))
             ]);
-            if (pa.peers?.length && pb.peers?.length) break;
-            if (Date.now() > deadline) throw new Error('los nodos no se pinearon mutuamente a tiempo');
+            const listo = (s) => s.peers?.length && Object.values(s.mesh || {}).some((m) => m.ready);
+            if (listo(pa) && listo(pb)) break;
+            if (Date.now() > deadline) throw new Error('la malla no se estableció a tiempo');
             await sleep(300);
         }
     }, 60000);
@@ -136,16 +140,46 @@ describe('federación entre dos nodos', () => {
             await ca.close(); await cb.close();
         });
 
-        it('el token corto NO cruza: escribirle a un token de otro nodo falla', async () => {
-            // Este es exactamente el problema que quedan por resolver las fases 4-5.
-            // El test lo deja documentado y fallará (avisando) cuando se arregle.
+        it('un mensaje dirigido a una INSTANCIA de otro nodo cruza', async () => {
+            // Este era el problema original: un mensaje a la conexión de otro
+            // proxio moría en `failedTokens`. Ahora la instancia lleva delante el
+            // prefijo del nodo, así que se lee de ella a quién relayarla.
             const ca = await connectTo(a.url);
             const cb = await connectTo(b.url);
-            cb.send({ to: [ca.token], message: 'por token', id: 'tok-1' });
-            const res = await cb.waitFor((m) => m.type === 'message_sent' || m.type === 'error');
-            expect(res.type).toBe('message_sent');
-            expect(res.failed).toContain(ca.token);
+            const payload = 'por-instancia-' + Date.now();
+            cb.send({ to: [ca.token], message: payload, id: 'inst-1' });
+            const got = await ca.waitFor((m) => m.type === 'message' && m.message === payload);
+            expect(got.from).toBe(cb.token);
             await ca.close(); await cb.close();
+        });
+
+        it('la instancia lleva el prefijo del nodo que la emitió', async () => {
+            const ca = await connectTo(a.url);
+            const cb = await connectTo(b.url);
+            expect(ca.token.slice(0, 2)).toBe('K7');
+            expect(cb.token.slice(0, 2)).toBe('M2');
+            expect(ca.token).not.toBe(cb.token);
+            await ca.close(); await cb.close();
+        });
+
+        it('avisa la baja al otro nodo cuando se corta un par cruzado', async () => {
+            const ca = await connectTo(a.url);
+            const cb = await connectTo(b.url);
+            cb.send({ to: [ca.token], message: 'hola' });
+            await ca.waitFor((m) => m.type === 'message');
+            const goneInstance = cb.token;
+            await cb.close();
+            const aviso = await ca.waitFor((m) => m.type === 'disconnected' && m.token === goneInstance, 8000);
+            expect(aviso.token).toBe(goneInstance);
+            await ca.close();
+        });
+
+        it('escribirle a una instancia de un nodo desconocido falla', async () => {
+            const cb = await connectTo(b.url);
+            cb.send({ to: ['ZZinstanciaDeNadie12345'], message: 'al vacío', id: 'nope-1' });
+            const res = await cb.waitFor((m) => m.type === 'message_sent');
+            expect(res.failed).toContain('ZZinstanciaDeNadie12345');
+            await cb.close();
         });
     });
 });

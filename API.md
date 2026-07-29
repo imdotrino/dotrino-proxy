@@ -22,6 +22,49 @@ Al conectarse, el servidor responde con:
 }
 ```
 
+## Identificadores: instancia y cita
+
+Hasta la fase 4 un mismo código de 4 caracteres hacía dos trabajos: era la
+dirección con la que se ruteaba un mensaje **y** el código que una persona leía
+o tecleaba. Eso es lo que rompía el ecosistema con varios proxios — como
+dirección global 4 caracteres no alcanzan (cada nodo sorteaba sin hablar con los
+demás, así que el mismo código podía estar vivo en dos nodos), y como código
+humano no podía alargarse sin volverse incómodo de dictar.
+
+Ahora son dos cosas:
+
+| | Instancia | Cita |
+|---|---|---|
+| Para qué | direccionar (`to:`) | que una persona la lea/dicte/escanee |
+| Forma | `<2 chars de nodo><22 base64url>` | `<2 chars de nodo><4>` = 6 caracteres |
+| La ve un humano | nunca | sí |
+| Vida | la de la conexión | minutos, **un solo uso** |
+| Unicidad | por construcción (prefijo de nodo) | por construcción (prefijo de nodo) |
+
+El `connected` trae `instance` (y `node`, el prefijo del proxio). `token` sigue
+llegando con el mismo valor por compatibilidad de nombre.
+
+Un mensaje `to: ["<instancia>"]` de otro proxio **cruza la malla**: el prefijo
+dice a qué nodo relayarlo, sin preguntarle a nadie. Si el prefijo no corresponde
+a ningún nodo conocido, se responde `failed`.
+
+### Citas: `pair-code` y `pair-redeem`
+
+```json
+→ { "type": "pair-code", "ttlMs": 300000 }
+← { "type": "pair-code", "code": "K7M2Q9", "expiresAt": 1750000000000, "node": "K7" }
+
+→ { "type": "pair-redeem", "code": "k7m2-q9" }
+← { "type": "pair-redeem", "ok": true, "instance": "K7…", "publickey": "<JWK>" }
+```
+
+El código se acepta en minúsculas y con espacios o guiones. Si lo emitió otro
+proxio, este le pregunta **a ese proxio** (por el prefijo), no a la malla entera:
+un pregón se lo queda el primero que conteste, que es como un nodo hostil se
+mete en emparejamientos ajenos.
+
+Desde `@dotrino/proxy-client`: `requestPairingCode()` y `redeemPairingCode(code)`.
+
 ## Mensajes
 
 ### Mensajes efímeros (`ephemeral`)

@@ -185,10 +185,14 @@ class MeshLink {
 
 /** La malla completa: enlaces salientes + atención de los entrantes. */
 class Mesh {
-    constructor({ urls = [], identity = null, registry, onDeliver, log = console.log } = {}) {
+    constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onPeerGone, onPairRedeem, onPairResult, log = console.log } = {}) {
         this.identity = identity;
         this.registry = registry;
         this.onDeliver = onDeliver;
+        this.onRelay = onRelay || (() => {});
+        this.onPeerGone = onPeerGone || (() => {});
+        this.onPairRedeem = onPairRedeem || (() => {});
+        this.onPairResult = onPairResult || (() => {});
         this.log = log;
         this.links = new Map();     // url -> MeshLink
         this.inbound = new Map();   // pubkey del peer -> ws entrante
@@ -232,6 +236,41 @@ class Mesh {
 
     _handleFrame(frame, link) {
         if (frame.op === 'deliver') this.onDeliver(frame.payload, link);
+        else if (frame.op === 'relay') this.onRelay(frame.payload, link);
+        else if (frame.op === 'peer-gone') this.onPeerGone(frame.payload, link);
+        else if (frame.op === 'pair-redeem') this.onPairRedeem(frame.payload, link);
+        else if (frame.op === 'pair-result') this.onPairResult(frame.payload, link);
+    }
+
+    /** Enlace SALIENTE hacia el nodo con esa pubkey (o null). */
+    linkForNode(nodePubkey) {
+        const peer = this.registry.byNodePubkey(nodePubkey);
+        if (!peer) return null;
+        return this.links.get(peer.url) || null;
+    }
+
+    /** Manda una operación a UN nodo concreto. Devuelve false si no hay enlace. */
+    sendTo(nodePubkey, op, payload, opts = {}) {
+        const link = this.linkForNode(nodePubkey);
+        if (!link) return false;
+        link.send(op, payload, opts);
+        return true;
+    }
+
+    /**
+     * Relay de un mensaje dirigido a una instancia de OTRO nodo.
+     *
+     * Va con `retain:false` a propósito: el mensaje entre dos conexiones vivas
+     * caduca igual que ellas. Si el enlace está caído, guardarlo para entregarlo
+     * cuando vuelva significaría soltarlo minutos después, cuando el destinatario
+     * probablemente ya no está — y quien envía prefiere enterarse ahora
+     * (`failed`) a que llegue tarde y fuera de contexto.
+     */
+    relayTo(nodePubkey, payload) {
+        const link = this.linkForNode(nodePubkey);
+        if (!link || !link.ready) return false;
+        link.send('relay', payload, { retain: false });
+        return true;
     }
 
     /** ¿Es una conexión entrante de la malla? */
@@ -255,6 +294,16 @@ class Mesh {
         if (timer.unref) timer.unref();
 
         const send = (o) => { try { ws.send(JSON.stringify(o)); } catch (_) {} };
+
+        // Canal de RESPUESTA por el mismo socket entrante. Hace falta porque hay
+        // operaciones que piden una contestación (el canje de una cita, por
+        // ejemplo) y de este lado no hay un MeshLink: solo el socket que abrió el
+        // otro. El que discó ya sabe procesar `t:'msg'` que le llegan de vuelta.
+        let replySeq = 0;
+        const replyChannel = {
+            send: (op, payload) => send({ t: 'msg', seq: ++replySeq, op, payload })
+        };
+
         send({ t: 'challenge', nonce });
 
         ws.on('message', (raw) => {
@@ -295,7 +344,7 @@ class Mesh {
             // El acuse va SIEMPRE, incluso si la entrega no encuentra a nadie: es
             // acuse de recepción del nodo, no de entrega al usuario. Si no, el
             // emisor reenviaría para siempre algo que ya llegó.
-            try { this._handleFrame(f, null); } finally { send({ t: 'ack', seq: f.seq }); }
+            try { this._handleFrame(f, replyChannel); } finally { send({ t: 'ack', seq: f.seq }); }
         });
 
         ws.on('close', () => {

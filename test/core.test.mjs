@@ -31,9 +31,15 @@ describe('core: connection & messaging', () => {
     }
 
     describe('token assignment', () => {
-        it('asigna un token de 4 caracteres alfanuméricos al conectar', async () => {
+        // El identificador de conexión ya no es un código de 4 caracteres para
+        // leer en voz alta: es una INSTANCIA con el prefijo del nodo delante
+        // (`<2 chars de nodo><22 base64url>`), única en todo el ecosistema y
+        // ruteable entre proxios. El código humano es la cita, que va aparte.
+        // Un nodo sin identidad de vault usa el prefijo `??` (no rutea, pero
+        // sigue funcionando suelto): es el caso de este servidor de test.
+        it('asigna una instancia cualificada por nodo al conectar', async () => {
             const a = await connect();
-            expect(a.token).toMatch(/^[1-9A-Z]{4}$/);
+            expect(a.token).toMatch(/^(\?\?|[1-9A-Z]{2})[A-Za-z0-9_-]{22}$/);
         });
 
         it('asigna tokens distintos a clientes distintos', async () => {
