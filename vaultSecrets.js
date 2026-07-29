@@ -66,12 +66,13 @@ function isEnrolled(dir = serviceDir()) {
  * Si no está enrolado no hace nada: el proxy corre con su `.env`, que es el modo
  * normal de un self-hoster.
  */
-function startVaultSecrets({ dir = serviceDir(), onSecrets, log = console.log } = {}) {
+function startVaultSecrets({ dir = serviceDir(), onSecrets, onPendiente, log = console.log } = {}) {
     if (!isEnrolled(dir)) return { enabled: false };
     let stopped = false;
+    let watcher = null;
     (async () => {
         const { waitForSecrets } = await import('@dotrino/vault/service');
-        const { applyEnv } = await import('@dotrino/vault/env');
+        const { applyEnv, watchEnv } = await import('@dotrino/vault/env');
         const secrets = await waitForSecrets({
             dir, ns: NS,
             onRetry: (e, delay) => log(`[vault] sin configuración todavía (${e.message}); reintento en ${Math.round(delay / 1000)}s`)
@@ -92,8 +93,40 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, log = console.log } 
             log('[vault] ⚠ reinicia el proxy para que tomen efecto.');
         }
         onSecrets(secrets, { injected, overridden });
+
+        // ESCUCHA de cambios. El proxio es el ÚNICO agente que NO se apaga al
+        // recibir el aviso: reiniciarlo corta todas las conexiones del ecosistema
+        // —incluida la de la bóveda que mandó el aviso—, así que un fallo aquí no
+        // se degrada, se cae todo. Lo anota y lo deja a la vista en `GET /node`;
+        // el reinicio lo decide un humano o el despliegue.
+        //
+        // Con la revocación, en cambio, sí conviene ser tajante en el mensaje: un
+        // proxio revocado sigue transportando (es su trabajo y no necesita al
+        // vault para eso), pero ya no puede leer configuración ni federarse con
+        // identidad válida, y eso hay que gritarlo.
+        watcher = await watchEnv({
+            // Con el log del proxio y NO `quiet`: si la escucha no se establece
+            // (o llega un aviso mal firmado, o se cae la conexión), callarlo deja
+            // al operador creyendo que está avisable cuando no lo está.
+            ns: NS, dir, log: (m) => log(String(m).replace(/^\[dotrino-env\]\s*/, '[vault] ')),
+            onUpdate: ({ motivo, ts }) => {
+                if (motivo === 'revocado') {
+                    log('[vault] ⚠ la bóveda REVOCÓ a este proxio. Sigue transportando, pero no volverá');
+                    log('[vault] ⚠ a leer configuración: re-enrólalo o bájalo.');
+                    onPendiente?.({ motivo, ts });
+                    return;
+                }
+                log('[vault] hay configuración NUEVA en la bóveda. No se aplica sola:');
+                log('[vault] reiniciar el proxio corta las conexiones de todo el ecosistema,');
+                log('[vault] así que el momento lo eliges tú. Reinícialo cuando puedas.');
+                onPendiente?.({ motivo, ts });
+            }
+        }).catch((e) => { log('[vault] sin escucha de cambios (' + e.message + ')'); return null; });
     })().catch((e) => log('[vault] carga de configuración abortada:', e.message));
-    return { enabled: true, stop: () => { stopped = true; } };
+    return {
+        enabled: true,
+        stop: () => { stopped = true; try { watcher?.stop() } catch (_) {} }
+    };
 }
 
 module.exports = { startVaultSecrets, isEnrolled, serviceDir, NS, SE_REAPLICAN };

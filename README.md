@@ -73,6 +73,21 @@ se aplica cuando llega. Consecuencia honesta: lo que sólo se lee al arrancar
 hasta el próximo reinicio**, y el log lo avisa en vez de dejarte creer que ya está.
 Lo que sí se re-aplica en caliente es TURN, con sus topes incluidos.
 
+**Cuando cambias algo en la bóveda, avisa.** Al guardar un secreto, la bóveda manda
+un aviso firmado a los agentes de su `ns`. El agente estándar **termina** y su
+supervisor lo levanta limpio —así lee todo fresco y, sobre todo, el valor viejo deja
+de existir en su memoria—, pero **el proxio no**: reiniciarlo corta las conexiones de
+todo el ecosistema, incluida la de la bóveda que mandó el aviso. Lo anota, lo dice en
+el log y lo publica en **`GET /peers`** bajo `vault`:
+
+```jsonc
+"vault": null                                        // al día
+"vault": { "motivo": "cambio", "desde": "…" }        // hay configuración sin aplicar
+"vault": { "motivo": "revocado", "desde": "…" }      // lo revocaron: re-enrólalo o bájalo
+```
+
+Cuando aparezca, reinícialo tú en el momento que menos duela.
+
 **Identidad.** Un agente tiene **una** identidad y se la cede el vault: no adopta
 cuentas y re-enrolar **reemplaza** la anterior. En el proxio esa llave es además su
 identidad de red —el id de nodo se deriva de ella—, así que re-enrolar le cambia el

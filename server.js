@@ -1331,7 +1331,13 @@ const server = http.createServer((req, res) => {
             self: nodeIdentity ? { nodeId: nodeIdentity.nodeId, hint: nodeIdentity.hint } : null,
             configured: PROXY_PEERS,
             peers: peerRegistry.known().map((p) => ({ url: p.url, nodeId: p.nodeId })),
-            mesh: mesh.stats()
+            mesh: mesh.stats(),
+            // El proxio es el único agente que NO se reinicia solo al cambiar su
+            // configuración (reiniciarlo corta el transporte de todos), así que el
+            // aviso tiene que quedar EN ALGÚN LADO donde se vea sin leer logs. Aquí:
+            // `null` = al día; con valor = hay configuración nueva esperando un
+            // reinicio, desde cuándo, y si además lo revocaron.
+            vault: vaultPendiente
         }));
         return;
     }
@@ -1386,6 +1392,9 @@ let rateLimiter = createRateLimiter();
 // Sin llaves: enabled:false (los clientes quedan STUN-only).
 let turnIssuer = createTurnIssuer();
 let vaultSecretsHandle = null;
+// Configuración nueva en la bóveda que este proxio NO aplicó (porque no se
+// reinicia solo). Se expone en `GET /peers` para que se vea sin leer logs.
+let vaultPendiente = null;
 
 // El proxy es transporte puro (sin secretos en su core): arranca SIEMPRE con lo
 // que tenga en el `.env`, y la configuración del vault se aplica cuando llega.
@@ -1407,6 +1416,10 @@ function startVaultSecretsLoop(log = console.log) {
             turnIssuer = createTurnIssuer();
             if (turnIssuer.enabled) log('[turn] llaves de Cloudflare desde el vault: TURN habilitado');
             else log('[vault] configuración recibida sin TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN sigue apagado');
+            vaultPendiente = null;   // lo que acaba de llegar YA está aplicado
+        },
+        onPendiente: ({ motivo, ts }) => {
+            vaultPendiente = { motivo, desde: new Date(ts).toISOString() };
         }
     });
     if (vaultSecretsHandle.enabled) {
