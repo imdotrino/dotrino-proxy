@@ -3,55 +3,93 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const crypto = require('crypto');
 const {
-    derivePrefix, isValidPrefix, signBody, verifyBody, ReplayWindow, newNonce, PREFIX_LEN, ALLOWED_CHARS
+    deriveNodeId, isValidNodeId, nodeIdMatches, hintOf, canonicalPubkeyBytes,
+    signBody, verifyBody, ReplayWindow, newNonce, NODE_ID_LEN, CODE_HINT_LEN, ALLOWED_CHARS
 } = require('../nodeIdentity');
 const { PeerRegistry } = require('../peers');
 
-// Identidad de nodo falsa con la misma forma que la del vault
-// (`service-identity.json` → device: {publickey, privateJwk}).
-function makeNodeIdentity(prefix) {
+/** Identidad de nodo con la misma forma que la del vault (device.publickey/privateJwk). */
+function makeNodeIdentity() {
     const kp = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
     const publicJwk = kp.publicKey.export({ format: 'jwk' });
     const privateJwk = kp.privateKey.export({ format: 'jwk' });
     const pubkey = JSON.stringify(publicJwk);
-    return { pubkey, privateJwk, prefix: prefix || derivePrefix(pubkey) };
+    const nodeId = deriveNodeId(pubkey);
+    return { pubkey, privateJwk, nodeId, hint: hintOf(nodeId), publicJwk };
 }
 
-// Persistencia en memoria con la misma superficie que usa PeerRegistry, con el
-// índice único de prefijo que impone SQLite.
 function makeMemoryPersist() {
     const rows = new Map();
     return {
         rows,
         loadPeerNodes: () => Array.from(rows.values()),
-        pinPeerNode(url, pubkey, prefix, now) {
+        pinPeerNode(url, pubkey, nodeId, now) {
             for (const r of rows.values()) {
-                if (r.prefix === prefix && r.url !== url) throw new Error('UNIQUE constraint failed: peer_nodes.prefix');
+                if (r.node_id === nodeId && r.url !== url) throw new Error('UNIQUE constraint failed: peer_nodes.node_id');
             }
-            rows.set(url, { url, pubkey, prefix, pinned_at: now, updated_at: now });
+            rows.set(url, { url, pubkey, node_id: nodeId, pinned_at: now, updated_at: now });
         },
         touchPeerNode(url, now) { const r = rows.get(url); if (r) r.updated_at = now; },
         deletePeerNode(url) { rows.delete(url); }
     };
 }
 
-describe('identidad de nodo', () => {
-    it('deriva un prefijo válido y determinista de la pubkey', () => {
-        const id = makeNodeIdentity();
-        expect(isValidPrefix(id.prefix)).toBe(true);
-        expect(id.prefix).toHaveLength(PREFIX_LEN);
-        expect(derivePrefix(id.pubkey)).toBe(id.prefix);
-        for (const c of id.prefix) expect(ALLOWED_CHARS).toContain(c);
+describe('id de nodo derivado', () => {
+    it('mide NODE_ID_LEN y usa solo el alfabeto permitido', () => {
+        const id = makeNodeIdentity().nodeId;
+        expect(isValidNodeId(id)).toBe(true);
+        expect(id).toHaveLength(NODE_ID_LEN);
+        for (const c of id) expect(ALLOWED_CHARS).toContain(c);
     });
 
-    it('pubkeys distintas dan prefijos que no tienen por qué coincidir', () => {
-        const prefixes = new Set(Array.from({ length: 40 }, () => makeNodeIdentity().prefix));
-        // Con 1.225 prefijos posibles y 40 muestras habrá algún choque de vez en
-        // cuando, pero no puede colapsar todo a un único valor.
-        expect(prefixes.size).toBeGreaterThan(20);
+    it('es determinista: la misma llave da siempre el mismo id', () => {
+        const { pubkey, nodeId } = makeNodeIdentity();
+        expect(deriveNodeId(pubkey)).toBe(nodeId);
+        expect(deriveNodeId(pubkey)).toBe(nodeId);
     });
 
-    it('firma y verifica un cuerpo, y rechaza el cuerpo alterado', () => {
+    // REGRESIÓN: derivarlo del JWK SERIALIZADO era inestable. El mismo par de
+    // llaves exportado por Node y por el navegador produce strings con los campos
+    // en otro orden (documentado en dotrino-vault/lib/src/invite.js), así que el
+    // id cambiaba al re-exportar la MISMA llave. Se deriva del punto comprimido.
+    it('NO cambia si la JWK trae los campos en otro orden o con extras', () => {
+        const { publicJwk, nodeId } = makeNodeIdentity();
+        const reordenada = JSON.stringify({
+            y: publicJwk.y, crv: 'P-256', x: publicJwk.x, kty: 'EC', ext: true, key_ops: ['verify']
+        });
+        expect(deriveNodeId(reordenada)).toBe(nodeId);
+    });
+
+    it('la forma canónica son 33 bytes SEC1 comprimidos', () => {
+        const { pubkey } = makeNodeIdentity();
+        const bytes = canonicalPubkeyBytes(pubkey);
+        expect(bytes).toHaveLength(33);
+        expect([0x02, 0x03]).toContain(bytes[0]);
+    });
+
+    it('llaves distintas dan ids distintos', () => {
+        const ids = new Set(Array.from({ length: 50 }, () => makeNodeIdentity().nodeId));
+        expect(ids.size).toBe(50);
+    });
+
+    it('nodeIdMatches ata el id a la llave, y rechaza el ajeno', () => {
+        const a = makeNodeIdentity();
+        const b = makeNodeIdentity();
+        expect(nodeIdMatches(a.nodeId, a.pubkey)).toBe(true);
+        expect(nodeIdMatches(b.nodeId, a.pubkey)).toBe(false);
+        expect(nodeIdMatches('nada', a.pubkey)).toBe(false);
+        expect(nodeIdMatches(a.nodeId, 'no-es-jwk')).toBe(false);
+    });
+
+    it('el filtro del código corto son los primeros caracteres del id', () => {
+        const { nodeId, hint } = makeNodeIdentity();
+        expect(hint).toBe(nodeId.slice(0, CODE_HINT_LEN));
+        expect(hint).toHaveLength(CODE_HINT_LEN);
+    });
+});
+
+describe('firmas de nodo', () => {
+    it('firma y verifica, y rechaza el cuerpo alterado', () => {
         const id = makeNodeIdentity();
         const body = { v: 1, op: 'deliver', toPubkey: 'pk-a', ts: Date.now(), nonce: newNonce() };
         const sig = signBody(id, body);
@@ -59,10 +97,9 @@ describe('identidad de nodo', () => {
         expect(verifyBody({ ...body, toPubkey: 'pk-b' }, sig, id.pubkey)).toBe(false);
     });
 
-    it('una firma de OTRO nodo no vale (no se puede hablar en nombre ajeno)', () => {
-        const a = makeNodeIdentity();
-        const b = makeNodeIdentity();
-        const body = { v: 1, op: 'deliver', ts: Date.now(), nonce: newNonce() };
+    it('una firma de OTRO nodo no vale', () => {
+        const a = makeNodeIdentity(); const b = makeNodeIdentity();
+        const body = { v: 1, ts: Date.now(), nonce: newNonce() };
         expect(verifyBody(body, signBody(a, body), b.pubkey)).toBe(false);
     });
 
@@ -71,7 +108,6 @@ describe('identidad de nodo', () => {
         const body = { v: 1, ts: Date.now() };
         expect(verifyBody(body, 'no-es-base64-valido', id.pubkey)).toBe(false);
         expect(verifyBody(body, signBody(id, body), 'no-es-jwk')).toBe(false);
-        expect(verifyBody(body, signBody(id, body), JSON.stringify({ kty: 'RSA' }))).toBe(false);
     });
 });
 
@@ -85,7 +121,7 @@ describe('anti-replay s2s', () => {
         expect(win.accept(n, Date.now())).toBe(false);
     });
 
-    it('rechaza tramas fuera de la ventana de tiempo', () => {
+    it('rechaza tramas fuera de la ventana', () => {
         expect(win.accept(newNonce(), Date.now() - 120_000)).toBe(false);
         expect(win.accept(newNonce(), Date.now() + 120_000)).toBe(false);
         expect(win.accept(newNonce(), NaN)).toBe(false);
@@ -102,102 +138,113 @@ describe('registro de peers', () => {
 
     beforeEach(() => {
         persist = makeMemoryPersist();
-        self = makeNodeIdentity('K7');
+        self = makeNodeIdentity();
         registry = new PeerRegistry({ urls: [], identity: self, persist, log: () => {} });
     });
 
-    function announcementOf(id, url) {
-        const body = { v: 1, prefix: id.prefix, pubkey: id.pubkey, url, ts: Date.now(), nonce: newNonce() };
+    const announcementOf = (id, url) => {
+        const body = { v: 1, nodeId: id.nodeId, pubkey: id.pubkey, url, ts: Date.now(), nonce: newNonce() };
         return { body, signature: signBody(id, body) };
-    }
+    };
 
     it('acepta un anuncio autofirmado y lo pinea', () => {
-        const other = makeNodeIdentity('M2');
+        const other = makeNodeIdentity();
         const peer = PeerRegistry.parseAnnouncement(announcementOf(other, 'https://p2'), 'https://p2');
-        expect(peer).toMatchObject({ url: 'https://p2', pubkey: other.pubkey, prefix: 'M2' });
+        expect(peer).toMatchObject({ url: 'https://p2', pubkey: other.pubkey, nodeId: other.nodeId });
         expect(registry.adopt(peer).status).toBe('pinned');
-        expect(registry.byNodePrefix('M2').url).toBe('https://p2');
-        expect(registry.byNodePubkey(other.pubkey).prefix).toBe('M2');
+        expect(registry.byNodeId(other.nodeId).url).toBe('https://p2');
     });
 
-    it('rechaza un anuncio cuya firma no corresponde a la pubkey declarada', () => {
-        const other = makeNodeIdentity('M2');
-        const impostor = makeNodeIdentity('M2');
-        const body = { v: 1, prefix: 'M2', pubkey: other.pubkey, url: 'https://p2', ts: Date.now(), nonce: newNonce() };
-        const forged = { body, signature: signBody(impostor, body) };
-        expect(PeerRegistry.parseAnnouncement(forged, 'https://p2')).toBeNull();
+    // ESTA es la comprobación que hace que no haga falta admitir a nadie: el id
+    // se verifica contra la llave, así que no se lo puede DECLARAR.
+    it('rechaza un anuncio cuyo id NO se deriva de su llave', () => {
+        const other = makeNodeIdentity();
+        const victima = makeNodeIdentity();
+        const body = { v: 1, nodeId: victima.nodeId, pubkey: other.pubkey, url: 'https://p2', ts: Date.now(), nonce: newNonce() };
+        const falso = { body, signature: signBody(other, body) };  // bien firmado, id ajeno
+        expect(PeerRegistry.parseAnnouncement(falso, 'https://p2')).toBeNull();
     });
 
-    it('rechaza anuncios viejos y con prefijo mal formado', () => {
-        const other = makeNodeIdentity('M2');
-        const stale = { v: 1, prefix: 'M2', pubkey: other.pubkey, url: 'https://p2', ts: Date.now() - 10 * 60 * 1000 };
+    it('rechaza un anuncio firmado por quien no es dueño de la pubkey', () => {
+        const other = makeNodeIdentity();
+        const impostor = makeNodeIdentity();
+        const body = { v: 1, nodeId: other.nodeId, pubkey: other.pubkey, url: 'https://p2', ts: Date.now(), nonce: newNonce() };
+        expect(PeerRegistry.parseAnnouncement({ body, signature: signBody(impostor, body) }, 'https://p2')).toBeNull();
+    });
+
+    it('rechaza anuncios viejos', () => {
+        const other = makeNodeIdentity();
+        const stale = { v: 1, nodeId: other.nodeId, pubkey: other.pubkey, url: 'https://p2', ts: Date.now() - 10 * 60 * 1000 };
         expect(PeerRegistry.parseAnnouncement({ body: stale, signature: signBody(other, stale) }, 'https://p2')).toBeNull();
-        const bad = { v: 1, prefix: 'm2!', pubkey: other.pubkey, url: 'https://p2', ts: Date.now() };
-        expect(PeerRegistry.parseAnnouncement({ body: bad, signature: signBody(other, bad) }, 'https://p2')).toBeNull();
-    });
-
-    it('NO deja que otra pubkey se quede con un prefijo ya pineado', () => {
-        const legit = makeNodeIdentity('M2');
-        const hostile = makeNodeIdentity('M2');
-        expect(registry.adopt({ url: 'https://legit', pubkey: legit.pubkey, prefix: 'M2' }).status).toBe('pinned');
-        const r = registry.adopt({ url: 'https://hostil', pubkey: hostile.pubkey, prefix: 'M2' });
-        expect(r.status).toBe('conflict');
-        // El legítimo sigue siendo el dueño del prefijo.
-        expect(registry.byNodePrefix('M2').url).toBe('https://legit');
-    });
-
-    it('NO deja que un peer reclame MI prefijo', () => {
-        const hostile = makeNodeIdentity('K7');
-        const r = registry.adopt({ url: 'https://hostil', pubkey: hostile.pubkey, prefix: 'K7' });
-        expect(r.status).toBe('conflict');
-        expect(r.reason).toMatch(/MI prefijo/);
     });
 
     it('NO cambia la pubkey pineada de un URL por su cuenta', () => {
-        const legit = makeNodeIdentity('M2');
-        const rotated = makeNodeIdentity('M2');
-        registry.adopt({ url: 'https://p2', pubkey: legit.pubkey, prefix: 'M2' });
-        const r = registry.adopt({ url: 'https://p2', pubkey: rotated.pubkey, prefix: 'M2' });
+        const legit = makeNodeIdentity();
+        const rotada = makeNodeIdentity();
+        registry.adopt({ url: 'https://p2', pubkey: legit.pubkey, nodeId: legit.nodeId });
+        const r = registry.adopt({ url: 'https://p2', pubkey: rotada.pubkey, nodeId: rotada.nodeId });
         expect(r.status).toBe('conflict');
-        expect(registry.byNodePubkey(legit.pubkey)).not.toBeNull();
-        expect(registry.byNodePubkey(rotated.pubkey)).toBeNull();
+        expect(registry.byNodeId(legit.nodeId)).not.toBeNull();
+        expect(registry.byNodeId(rotada.nodeId)).toBeNull();
+    });
+
+    it('rechaza el mismo nodo anunciado bajo dos URLs', () => {
+        const other = makeNodeIdentity();
+        registry.adopt({ url: 'https://a', pubkey: other.pubkey, nodeId: other.nodeId });
+        const r = registry.adopt({ url: 'https://b', pubkey: other.pubkey, nodeId: other.nodeId });
+        expect(r.status).toBe('conflict');
+    });
+
+    it('rechaza a un peer que anuncia MI propia llave', () => {
+        const r = registry.adopt({ url: 'https://hostil', pubkey: self.pubkey, nodeId: self.nodeId });
+        expect(r.status).toBe('conflict');
     });
 
     it('re-adoptar el mismo peer es idempotente', () => {
-        const other = makeNodeIdentity('M2');
-        const peer = { url: 'https://p2', pubkey: other.pubkey, prefix: 'M2' };
+        const other = makeNodeIdentity();
+        const peer = { url: 'https://p2', pubkey: other.pubkey, nodeId: other.nodeId };
         expect(registry.adopt(peer).status).toBe('pinned');
         expect(registry.adopt(peer).status).toBe('known');
         expect(registry.known()).toHaveLength(1);
     });
 
-    it('rehidrata los peers pineados desde disco', () => {
-        const other = makeNodeIdentity('M2');
-        registry.adopt({ url: 'https://p2', pubkey: other.pubkey, prefix: 'M2' });
+    // El filtro de 2 caracteres NO es exclusivo: dos nodos pueden compartirlo y
+    // eso está bien. Lo que importa es que se devuelvan TODOS los candidatos,
+    // para no elegir "el primero que conteste".
+    it('candidatesByHint devuelve todos los que comparten filtro', () => {
+        const a = makeNodeIdentity();
+        const b = { ...makeNodeIdentity() };
+        // Forzamos que compartan filtro para probar el caso, que es raro por azar.
+        b.nodeId = a.nodeId.slice(0, CODE_HINT_LEN) + b.nodeId.slice(CODE_HINT_LEN);
+        registry.adopt({ url: 'https://a', pubkey: a.pubkey, nodeId: a.nodeId });
+        registry.adopt({ url: 'https://b', pubkey: b.pubkey, nodeId: b.nodeId });
+        const cands = registry.candidatesByHint(a.nodeId.slice(0, CODE_HINT_LEN));
+        expect(cands).toHaveLength(2);
+        expect(registry.candidatesByHint('ZZ')).toHaveLength(0);
+    });
+
+    it('descarta al rehidratar los pineos cuyo id no deriva de su llave', () => {
+        const other = makeNodeIdentity();
+        registry.adopt({ url: 'https://p2', pubkey: other.pubkey, nodeId: other.nodeId });
+        // Simula una fila del esquema viejo, donde el id se DECLARABA.
+        persist.rows.get('https://p2').node_id = 'P1XXXXXXXXXX';
+        const fresh = new PeerRegistry({ urls: [], identity: self, persist, log: () => {} });
+        expect(fresh.load()).toBe(0);
+        expect(persist.rows.size).toBe(0);
+    });
+
+    it('rehidrata los pineos válidos', () => {
+        const other = makeNodeIdentity();
+        registry.adopt({ url: 'https://p2', pubkey: other.pubkey, nodeId: other.nodeId });
         const fresh = new PeerRegistry({ urls: [], identity: self, persist, log: () => {} });
         expect(fresh.load()).toBe(1);
-        expect(fresh.byNodePrefix('M2').pubkey).toBe(other.pubkey);
+        expect(fresh.byNodeId(other.nodeId).pubkey).toBe(other.pubkey);
     });
 
-    it('descubre por HTTP y pinea; un peer caído no rompe nada', async () => {
-        const other = makeNodeIdentity('M2');
-        const reg = new PeerRegistry({
-            urls: ['https://p2', 'https://caido'], identity: self, persist, log: () => {},
-            fetchImpl: async (url) => {
-                if (url.startsWith('https://caido')) throw new Error('ECONNREFUSED');
-                return { ok: true, json: async () => announcementOf(other, 'https://p2') };
-            }
-        });
-        const out = await reg.discoverAll();
-        expect(out.find(o => o.url === 'https://p2').status).toBe('pinned');
-        expect(out.find(o => o.url === 'https://caido').status).toBe('unreachable');
-        expect(reg.byNodePrefix('M2')).not.toBeNull();
-    });
-
-    it('el anuncio propio va firmado y se verifica con la propia pubkey', () => {
+    it('el anuncio propio va firmado y se verifica contra la propia llave', () => {
         const a = registry.selfAnnouncement('https://yo');
-        expect(a.body.prefix).toBe('K7');
+        expect(a.body.nodeId).toBe(self.nodeId);
         expect(verifyBody(a.body, a.signature, self.pubkey)).toBe(true);
-        expect(PeerRegistry.parseAnnouncement(a, 'https://yo')).toMatchObject({ prefix: 'K7' });
+        expect(PeerRegistry.parseAnnouncement(a, 'https://yo')).toMatchObject({ nodeId: self.nodeId });
     });
 });

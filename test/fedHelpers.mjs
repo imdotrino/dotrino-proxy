@@ -58,7 +58,7 @@ export function freePort() {
  * El puerto se fija de antemano (en vez de leerlo del log) porque con
  * NODE_ENV=test el servidor arranca en silencio a propósito.
  */
-export async function startNode({ name, dir, peers = [], prefix, port, env = {} } = {}) {
+export async function startNode({ name, dir, peers = [], port, env = {} } = {}) {
     const actualPort = port || await freePort();
     const log = [];
     const child = fork(SERVER, [], {
@@ -71,7 +71,6 @@ export async function startNode({ name, dir, peers = [], prefix, port, env = {} 
             VAULT_SERVICE_DIR: path.join(dir, 'vault-service'),
             PROXY_PEERS: peers.join(','),
             PROXY_PUBLIC_URL: `http://127.0.0.1:${actualPort}`,
-            PROXY_NODE_PREFIX: prefix || '',
             RATE_LIMIT_DISABLED: '1',
             ...env
         },
@@ -116,6 +115,16 @@ export async function startNode({ name, dir, peers = [], prefix, port, env = {} 
         }
         await sleep(120);
     }
+
+    // El id de nodo ya NO se puede fijar por entorno: se DERIVA de la llave del
+    // nodo, que es lo que hace que nadie pueda usar el ajeno. Así que el arnés lo
+    // lee de `/peers` en vez de imponerlo, y los tests comparan contra él.
+    try {
+        const info = await fetch(`${node.http}/peers`).then((r) => r.json());
+        node.nodeId = info?.self?.nodeId || null;
+        node.hint = info?.self?.hint || null;
+    } catch (_) { node.nodeId = null; node.hint = null; }
+
     return node;
 }
 

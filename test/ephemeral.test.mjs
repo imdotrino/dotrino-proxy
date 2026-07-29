@@ -16,8 +16,8 @@ describe('envío efímero', () => {
         const portA = await freePort();
         const portB = await freePort();
         [a, b] = await Promise.all([
-            startNode({ name: 'A', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] }),
-            startNode({ name: 'B', dir: dirB, port: portB, prefix: 'M2', peers: [`http://127.0.0.1:${portA}`] })
+            startNode({ name: 'A', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, peers: [`http://127.0.0.1:${portA}`] })
         ]);
         const deadline = Date.now() + 30000;
         for (;;) {

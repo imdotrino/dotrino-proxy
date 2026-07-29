@@ -7,18 +7,21 @@
  * de saber a qué nodo pertenece un identificador.
  *
  * Ahora cada nodo publica `GET /node` con un anuncio AUTOFIRMADO
- * (`{body:{v,prefix,pubkey,url,ts}, signature}`) y este registro lo PINEA la
+ * (`{body:{v,nodeId,pubkey,url,ts}, signature}`) y este registro lo PINEA la
  * primera vez que lo ve. A partir de ahí:
  *   - una trama s2s solo se acepta si viene firmada por la pubkey pineada;
- *   - si un URL cambia de pubkey, o dos nodos reclaman el mismo prefijo, NO se
- *     resuelve solo: se rechaza y se grita en el log. Un takeover silencioso de
- *     prefijo sería secuestrar el espacio de nombres de otro nodo entero.
+ *   - el id de nodo se VERIFICA contra la llave (se deriva de ella), así que
+ *     nadie puede anunciar el id de otro sin su llave privada. Eso es lo que
+ *     hace que no haga falta que nadie "admita" un nodo nuevo;
+ *   - si un URL cambia de pubkey, NO se resuelve solo: se rechaza y se grita en
+ *     el log, porque un cambio legítimo de llave es justo cuando el operador
+ *     quiere enterarse.
  *
  * El pineo es confianza-al-primer-uso. Es suficiente entre nodos propios; para
  * terceros, la fuente de verdad es el directorio firmado (nodes.json), que gana
  * sobre el TOFU cuando trae una entrada para ese URL.
  */
-const { verifyBody, isValidPrefix, signBody, newNonce } = require('./nodeIdentity');
+const { verifyBody, isValidNodeId, nodeIdMatches, hintOf, signBody, newNonce } = require('./nodeIdentity');
 
 const ANNOUNCE_TS_TOLERANCE_MS = 5 * 60 * 1000;
 
@@ -37,29 +40,59 @@ class PeerRegistry {
         this.persist = persist;
         this.log = log;
         this.fetchImpl = fetchImpl;
-        this.byUrl = new Map();     // url    -> {url, pubkey, prefix}
-        this.byPubkey = new Map();  // pubkey -> {url, pubkey, prefix}
-        this.byPrefix = new Map();  // prefix -> {url, pubkey, prefix}
+        this.byUrl = new Map();     // url    -> {url, pubkey, nodeId}
+        this.byPubkey = new Map();  // pubkey -> {url, pubkey, nodeId}
+        this.byId = new Map();      // nodeId -> {url, pubkey, nodeId}
+        // hint (2 chars) -> Set de peers. Es un Set y no un valor porque el
+        // filtro PUEDE repetirse entre nodos: no es un reclamo exclusivo.
+        this.byHint = new Map();
         this.refreshTimer = null;
     }
 
-    /** Rehidrata desde SQLite lo ya pineado. */
+    /**
+     * Rehidrata desde SQLite lo ya pineado. Las filas cuyo id NO se corresponde
+     * con su pubkey se DESCARTAN: pueden venir de un esquema viejo donde el id
+     * se declaraba en vez de derivarse, y aceptarlas sería seguir confiando en
+     * una declaración. Se vuelven a pinear solas en el próximo descubrimiento.
+     */
     load() {
         let rows = [];
         try { rows = this.persist.loadPeerNodes(); } catch (_) { rows = []; }
-        for (const r of rows) this._index({ url: r.url, pubkey: r.pubkey, prefix: r.prefix });
-        return rows.length;
+        let ok = 0;
+        for (const r of rows) {
+            if (!nodeIdMatches(r.node_id, r.pubkey)) {
+                try { this.persist.deletePeerNode(r.url); } catch (_) {}
+                this.log(`[fed] descartado pineo obsoleto de ${r.url} (su id no se deriva de su llave)`);
+                continue;
+            }
+            this._index({ url: r.url, pubkey: r.pubkey, nodeId: r.node_id });
+            ok++;
+        }
+        return ok;
     }
 
     _index(peer) {
         this.byUrl.set(peer.url, peer);
         this.byPubkey.set(peer.pubkey, peer);
-        this.byPrefix.set(peer.prefix, peer);
+        this.byId.set(peer.nodeId, peer);
+        const h = hintOf(peer.nodeId);
+        if (!this.byHint.has(h)) this.byHint.set(h, new Set());
+        this.byHint.get(h).add(peer);
     }
 
     get(url) { return this.byUrl.get(url) || null; }
     byNodePubkey(pubkey) { return this.byPubkey.get(pubkey) || null; }
-    byNodePrefix(prefix) { return this.byPrefix.get(prefix) || null; }
+    byNodeId(nodeId) { return this.byId.get(nodeId) || null; }
+
+    /**
+     * Peers cuyo id EMPIEZA con ese filtro. Puede devolver más de uno: el filtro
+     * no es exclusivo. En la práctica es uno (con 100 nodos, 1,08 de media).
+     */
+    candidatesByHint(hint) {
+        const set = this.byHint.get(hint);
+        return set ? Array.from(set) : [];
+    }
+
     known() { return Array.from(this.byUrl.values()); }
 
     /** El anuncio autofirmado de ESTE nodo (lo que sirve GET /node). */
@@ -67,7 +100,7 @@ class PeerRegistry {
         if (!this.identity) return null;
         const body = {
             v: 1,
-            prefix: this.identity.prefix,
+            nodeId: this.identity.nodeId,
             pubkey: this.identity.pubkey,
             url: selfUrl || null,
             ts: Date.now(),
@@ -78,20 +111,23 @@ class PeerRegistry {
 
     /**
      * Valida un anuncio recibido: firmado por la pubkey que declara, fresco y con
-     * prefijo bien formado. Devuelve {url,pubkey,prefix} o null.
+     * id bien formado Y derivado de su llave. Devuelve {url,pubkey,nodeId} o null.
      */
     static parseAnnouncement(announcement, url) {
         const body = announcement && announcement.body;
         const sig = announcement && announcement.signature;
         if (!body || !sig || body.v !== 1) return null;
-        if (!body.pubkey || !isValidPrefix(body.prefix)) return null;
+        if (!body.pubkey || !isValidNodeId(body.nodeId)) return null;
         if (!Number.isFinite(body.ts) || Math.abs(Date.now() - body.ts) > ANNOUNCE_TS_TOLERANCE_MS) return null;
-        // AUTOfirmado: la firma se verifica con la pubkey que el propio cuerpo
-        // declara. Esto NO prueba que sea el nodo que decimos querer (eso lo da el
-        // pineo o el directorio); prueba que quien contesta tiene la llave privada
-        // de esa pubkey, o sea que no puede anunciar la pubkey de otro.
+        // AUTOfirmado: prueba que quien contesta tiene la llave privada de esa
+        // pubkey, o sea que no puede anunciar la pubkey de otro.
         if (!verifyBody(body, sig, body.pubkey)) return null;
-        return { url, pubkey: body.pubkey, prefix: body.prefix };
+        // Y EL ID SE VERIFICA CONTRA LA LLAVE. Sin esto el id sería una simple
+        // declaración —se lo quedaba el primero que lo dijera— y haría falta que
+        // alguien la validara. Con esto, usar el id de otro exige su llave
+        // privada, y por eso no hay nada que "la red" tenga que admitir.
+        if (!nodeIdMatches(body.nodeId, body.pubkey)) return null;
+        return { url, pubkey: body.pubkey, nodeId: body.nodeId };
     }
 
     /**
@@ -104,20 +140,21 @@ class PeerRegistry {
             if (existing.pubkey !== peer.pubkey) {
                 return { status: 'conflict', reason: `el peer ${peer.url} cambió de pubkey; se mantiene la pineada` };
             }
-            if (existing.prefix !== peer.prefix) {
-                return { status: 'conflict', reason: `el peer ${peer.url} cambió de prefijo (${existing.prefix} → ${peer.prefix}); se mantiene el pineado` };
-            }
             try { this.persist.touchPeerNode(peer.url, Date.now()); } catch (_) {}
             return { status: 'known', peer: existing };
         }
-        const byPrefix = this.byPrefix.get(peer.prefix);
-        if (byPrefix && byPrefix.pubkey !== peer.pubkey) {
-            return { status: 'conflict', reason: `el prefijo ${peer.prefix} ya es de ${byPrefix.url}; ${peer.url} no lo puede reclamar` };
+        // Ya no hay conflicto de "id tomado": el id se deriva de la llave, así que
+        // dos ids iguales significan la MISMA llave. Lo que sí se comprueba es que
+        // el mismo nodo no aparezca bajo dos URLs distintas, porque entonces no se
+        // sabría a cuál hablarle.
+        const sameId = this.byId.get(peer.nodeId);
+        if (sameId && sameId.url !== peer.url) {
+            return { status: 'conflict', reason: `el nodo ${peer.nodeId} ya está pineado en ${sameId.url}; ${peer.url} anuncia la misma llave` };
         }
-        if (this.identity && peer.prefix === this.identity.prefix) {
-            return { status: 'conflict', reason: `el peer ${peer.url} reclama MI prefijo (${peer.prefix})` };
+        if (this.identity && peer.nodeId === this.identity.nodeId) {
+            return { status: 'conflict', reason: `el peer ${peer.url} anuncia MI propia llave` };
         }
-        try { this.persist.pinPeerNode(peer.url, peer.pubkey, peer.prefix, Date.now()); } catch (e) {
+        try { this.persist.pinPeerNode(peer.url, peer.pubkey, peer.nodeId, Date.now()); } catch (e) {
             return { status: 'conflict', reason: `no se pudo pinear ${peer.url}: ${e.message}` };
         }
         this._index(peer);
@@ -148,7 +185,7 @@ class PeerRegistry {
         for (const url of this.urls) {
             const r = await this.discover(url);
             out.push({ url, ...r });
-            if (r.status === 'pinned') this.log(`[fed] peer pineado: ${url} (prefijo ${r.peer.prefix})`);
+            if (r.status === 'pinned') this.log(`[fed] peer pineado: ${url} (id ${r.peer.nodeId})`);
             else if (r.status === 'conflict') this.log(`[fed] CONFLICTO: ${r.reason}`);
             else if (r.status === 'unreachable') this.log(`[fed] peer inalcanzable ${url}: ${r.reason}`);
         }

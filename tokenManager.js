@@ -32,25 +32,30 @@ class TokenManager {
         this.activeTokens = new Map();
         // Longitud de los tokens cortos (histórico; ver generateRandomToken)
         this.tokenLength = 4;
-        // Prefijo del nodo (2 caracteres). Lo fija server.js al arrancar, cuando
-        // ya cargó la identidad del nodo. Sin él las instancias no son ruteables
-        // entre nodos, así que se arranca gritando en vez de emitir a ciegas.
-        this.nodePrefix = null;
+        // Id del nodo (12 caracteres, derivado de su llave). Lo fija server.js al
+        // arrancar. Sin él las instancias no son ruteables entre nodos.
+        this.nodeId = null;
     }
 
-    /** Fija el prefijo de nodo que llevarán las instancias emitidas. */
-    setNodePrefix(prefix) {
-        this.nodePrefix = prefix || null;
+    /** Fija el id de nodo que llevarán las instancias emitidas. */
+    setNodeId(nodeId) {
+        this.nodeId = nodeId || null;
     }
 
     /**
-     * Genera una instancia: `<prefijo de nodo><22 chars base64url>`.
-     * Sin prefijo de nodo (nodo sin identidad) usa `??`, que no rutea a ninguna
-     * parte pero mantiene el formato — el nodo suelto sigue funcionando solo.
+     * Genera una instancia: `<id de nodo><22 chars base64url>`.
+     *
+     * El id va delante para que rutearla sea LEERLA: quien la recibe sabe a qué
+     * proxio mandarla sin preguntarle a nadie ni mantener ninguna tabla. Y como
+     * el id se deriva de la llave del nodo, la instancia es única en todo el
+     * ecosistema por construcción, sin que nadie tenga que repartir nada.
+     *
+     * Sin identidad de nodo usa `??` de relleno: no rutea a ninguna parte, pero
+     * mantiene el formato y el nodo suelto sigue funcionando solo.
      */
     generateInstance() {
-        const prefix = this.nodePrefix || '??';
-        return prefix + crypto.randomBytes(INSTANCE_BYTES).toString('base64url');
+        const id = this.nodeId || '??';
+        return id + crypto.randomBytes(INSTANCE_BYTES).toString('base64url');
     }
 
     // Generar un token corto aleatorio de la longitud especificada.

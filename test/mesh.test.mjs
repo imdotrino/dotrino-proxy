@@ -27,8 +27,8 @@ describe('malla s2s por WebSocket', () => {
         portA = await freePort();
         portB = await freePort();
         [a, b] = await Promise.all([
-            startNode({ name: 'A', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] }),
-            startNode({ name: 'B', dir: dirB, port: portB, prefix: 'M2', peers: [`http://127.0.0.1:${portA}`] })
+            startNode({ name: 'A', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, peers: [`http://127.0.0.1:${portA}`] })
         ]);
         await waitMeshReady([a, b]);
     }, 60000);
@@ -87,7 +87,7 @@ describe('malla s2s por WebSocket', () => {
         cb.send({ to_publickey: alice.publickey, message: payload });
         await sleep(400);
         // A vuelve con su misma base y su misma identidad.
-        a = await startNode({ name: 'A2', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] });
+        a = await startNode({ name: 'A2', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] });
         await waitMeshReady([a, b], 40000);
         // Alice reconecta a A y se identifica: A es su home, así que le baja lo
         // encolado mientras estaba caído.
@@ -159,8 +159,8 @@ describe('límite por peer en la malla', () => {
         const portA = await freePort();
         const portB = await freePort();
         [a, b] = await Promise.all([
-            startNode({ name: 'A', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] }),
-            startNode({ name: 'B', dir: dirB, port: portB, prefix: 'M2', peers: [`http://127.0.0.1:${portA}`] })
+            startNode({ name: 'A', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, peers: [`http://127.0.0.1:${portA}`] })
         ]);
         await waitMeshReady([a, b]);
     }, 60000);
@@ -172,12 +172,15 @@ describe('límite por peer en la malla', () => {
 
     it('corta un barrido de canjes por s2s', async () => {
         const cb = await connectTo(b.url);
-        // 60 canjes seguidos contra códigos inventados del nodo A. El burst de
-        // pair-redeem es 20: el resto tiene que quedarse sin respuesta del dueño
-        // (se descarta en el borde) y caer en el timeout del canje.
+        // 60 canjes seguidos contra códigos inventados CON EL FILTRO DE A, para
+        // que de verdad salgan por la malla (con un filtro de nadie se rechazan
+        // local y no se ejercita el límite). El burst de pair-redeem es 20: el
+        // resto se descarta en el borde y cae en el timeout del canje.
+        const AB = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const cuerpo = (i) => AB[i % 35] + AB[(i * 7) % 35] + AB[(i * 13) % 35] + AB[(i * 29) % 35];
         const respuestas = [];
         for (let i = 0; i < 60; i++) {
-            cb.send({ type: 'pair-redeem', code: 'K7' + String(i).padStart(4, '0'), id: `sweep-${i}` });
+            cb.send({ type: 'pair-redeem', code: a.hint + cuerpo(i), id: `sweep-${i}` });
         }
         await sleep(2500);
         for (const m of cb.recv) if (m.type === 'pair-redeem') respuestas.push(m);

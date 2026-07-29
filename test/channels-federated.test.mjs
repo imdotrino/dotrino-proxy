@@ -8,8 +8,8 @@ import {
 const require = createRequire(import.meta.url);
 const crypto = require('crypto');
 
-// Canal con NODO DUEÑO: el nombre lleva delante el prefijo del proxio que lo
-// hospeda (`K7/mesa-42`). Ese nodo guarda la membresía y los demás le pasan las
+// Canal con NODO DUEÑO: el nombre lleva delante el id del proxio que lo
+// hospeda (`<id de 12>/mesa-42`). Ese nodo guarda la membresía y los demás le pasan las
 // operaciones. Así un servicio vive siempre en el mismo proxio y dos personas en
 // nodos distintos SÍ aparecen en la misma lista — sin que cada consulta le
 // pregunte a toda la malla ni que todos los peers se enteren de quién está dónde.
@@ -40,8 +40,8 @@ describe('canales con nodo dueño', () => {
         const portA = await freePort();
         const portB = await freePort();
         [a, b] = await Promise.all([
-            startNode({ name: 'A', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] }),
-            startNode({ name: 'B', dir: dirB, port: portB, prefix: 'M2', peers: [`http://127.0.0.1:${portA}`] })
+            startNode({ name: 'A', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, peers: [`http://127.0.0.1:${portA}`] })
         ]);
         const deadline = Date.now() + 30000;
         for (;;) {
@@ -57,7 +57,7 @@ describe('canales con nodo dueño', () => {
         for (const d of [dirA, dirB]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {} }
     });
 
-    it('un canal sin prefijo sigue siendo local a cada nodo', async () => {
+    it('un canal sin id de nodo sigue siendo local a cada nodo', async () => {
         const sign = makeChannelSigner();
         const ca = await connectTo(a.url);
         const cb = await connectTo(b.url);
@@ -71,7 +71,7 @@ describe('canales con nodo dueño', () => {
 
     it('dos personas en nodos distintos aparecen en la MISMA lista', async () => {
         const sign = makeChannelSigner();
-        const nombre = 'K7/mesa-compartida';
+        const nombre = `${a.nodeId}/mesa-compartida`;
         const ca = await connectTo(a.url);   // en el nodo dueño
         const cb = await connectTo(b.url);   // en el otro nodo
 
@@ -89,7 +89,7 @@ describe('canales con nodo dueño', () => {
 
     it('el miembro que ya estaba se entera del que entra desde otro nodo', async () => {
         const sign = makeChannelSigner();
-        const nombre = 'K7/mesa-avisos';
+        const nombre = `${a.nodeId}/mesa-avisos`;
         const ca = await connectTo(a.url);
         ca.send({ type: 'publish', channel: sign(nombre) });
         await ca.waitFor((m) => m.type === 'published');
@@ -105,7 +105,7 @@ describe('canales con nodo dueño', () => {
 
     it('el aviso de baja llega al miembro que está en OTRO nodo', async () => {
         const sign = makeChannelSigner();
-        const nombre = 'K7/mesa-bajas';
+        const nombre = `${a.nodeId}/mesa-bajas`;
         const ca = await connectTo(a.url);   // dueño
         const cb = await connectTo(b.url);   // remoto
         ca.send({ type: 'publish', channel: sign(nombre) });
@@ -123,7 +123,7 @@ describe('canales con nodo dueño', () => {
 
     it('contar un canal ajeno da el número del dueño, no cero', async () => {
         const sign = makeChannelSigner();
-        const nombre = 'K7/mesa-cuenta';
+        const nombre = `${a.nodeId}/mesa-cuenta`;
         const ca = await connectTo(a.url);
         ca.send({ type: 'publish', channel: sign(nombre) });
         await ca.waitFor((m) => m.type === 'published');
@@ -138,7 +138,7 @@ describe('canales con nodo dueño', () => {
     it('un canal de un nodo desconocido responde error, no una lista vacía', async () => {
         const sign = makeChannelSigner();
         const cb = await connectTo(b.url);
-        cb.send({ type: 'list', channel: sign('ZZ/sala-fantasma'), id: 'zz' });
+        cb.send({ type: 'list', channel: sign('ZZZZZZZZZZZZ/sala-fantasma'), id: 'zz' });
         const res = await cb.waitFor((m) => m.type === 'error' || m.type === 'channel_list', 10000);
         expect(res.type).toBe('error');
         expect(res.error).toMatch(/nodo desconocido/i);

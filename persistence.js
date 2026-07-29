@@ -60,12 +60,32 @@ function init(dbFile) {
         CREATE TABLE IF NOT EXISTS peer_nodes (
             url        TEXT PRIMARY KEY,
             pubkey     TEXT NOT NULL,
-            prefix     TEXT NOT NULL,
+            node_id    TEXT NOT NULL,
             pinned_at  INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_peer_prefix ON peer_nodes(prefix);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_peer_node_id ON peer_nodes(node_id);
     `);
+    // El esquema viejo tenía una columna `prefix` (el id de nodo se DECLARABA en
+    // vez de derivarse de la llave). No se migra: los pineos se rehacen solos en
+    // el siguiente descubrimiento, y arrastrar ids declarados sería seguir
+    // confiando justo en lo que dejó de valer.
+    try {
+        const cols = db.prepare('PRAGMA table_info(peer_nodes)').all().map((c) => c.name);
+        if (cols.includes('prefix') && !cols.includes('node_id')) {
+            db.exec('DROP TABLE peer_nodes;');
+            db.exec(`
+                CREATE TABLE peer_nodes (
+                    url        TEXT PRIMARY KEY,
+                    pubkey     TEXT NOT NULL,
+                    node_id    TEXT NOT NULL,
+                    pinned_at  INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_peer_node_id ON peer_nodes(node_id);
+            `);
+        }
+    } catch (_) { /* base nueva: nada que migrar */ }
     return db;
 }
 
@@ -215,21 +235,21 @@ function loadDueScheduledPushes(now) {
 }
 
 // ----- peer_nodes (federación: identidad pineada de cada proxy peer) -----
-// Se pinea la primera vez que el peer se anuncia por GET /node y NO se cambia
-// sola: si el mismo URL vuelve con otra pubkey, o si otra pubkey reclama un
-// prefijo ya tomado, se rechaza y se grita en el log. Un cambio legítimo de
-// llave se hace a mano (borrando la fila), que es exactamente cuando el
-// operador quiere enterarse.
+// Se pinea la primera vez que el peer se anuncia por GET /node. El `node_id` se
+// DERIVA de la pubkey, así que dos ids iguales significan la misma llave: no hay
+// conflicto de "id tomado" que resolver. Lo que sí se rechaza es que un mismo
+// URL vuelva con otra pubkey; un cambio legítimo de llave se hace a mano
+// (borrando la fila), que es exactamente cuando el operador quiere enterarse.
 
 function loadPeerNodes() {
-    return db.prepare('SELECT url, pubkey, prefix, pinned_at, updated_at FROM peer_nodes').all();
+    return db.prepare('SELECT url, pubkey, node_id, pinned_at, updated_at FROM peer_nodes').all();
 }
 
-function pinPeerNode(url, pubkey, prefix, now) {
+function pinPeerNode(url, pubkey, nodeId, now) {
     db.prepare(`
-        INSERT INTO peer_nodes (url, pubkey, prefix, pinned_at, updated_at)
+        INSERT INTO peer_nodes (url, pubkey, node_id, pinned_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
-    `).run(url, pubkey, prefix, now, now);
+    `).run(url, pubkey, nodeId, now, now);
 }
 
 function touchPeerNode(url, now) {

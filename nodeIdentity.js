@@ -24,10 +24,21 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// Mismo alfabeto que los tokens (tokenManager.js): sin 0 ni minúsculas, para que
-// un prefijo se pueda dictar por teléfono sin ambigüedad.
+// Mismo alfabeto que los códigos: sin 0 ni minúsculas.
 const ALLOWED_CHARS = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const PREFIX_LEN = 2;
+
+// El id de nodo va DENTRO de la instancia, que nadie lee nunca, así que acá
+// alargar es gratis. 12 caracteres son 35^12 ≈ 3,4·10^18: moler una llave para
+// caer en el id de otro es inviable, y por eso NADIE TIENE QUE ADMITIR NADA —
+// reclamar el id ajeno exige su llave privada, no el permiso de la red.
+const NODE_ID_LEN = 12;
+
+// Los 2 primeros caracteres del id viajan en el código corto como FILTRO, no
+// como reclamo: sirven para saber a qué peers preguntarles. Pueden repetirse
+// entre nodos sin que importe (se pregunta a todos los que coincidan, que en la
+// práctica es uno), y como salen del id derivado, un nodo NO puede contestar por
+// un código cuyo filtro no le corresponde.
+const CODE_HINT_LEN = 2;
 
 function canonicalStringify(obj) {
     if (typeof obj !== 'object' || obj === null) return JSON.stringify(obj);
@@ -37,21 +48,66 @@ function canonicalStringify(obj) {
 }
 
 /**
- * Prefijo derivado de la pubkey: sha256(pubkey) → 2 símbolos del alfabeto.
- * Verificable por cualquiera (no hace falta confiar en lo que el nodo declara),
- * pero NO exclusivo: moler llaves hasta caer en un prefijo elegido es barato. La
- * exclusividad, cuando importe, la da el directorio firmado — no este derivado.
+ * Forma CANÓNICA de una pubkey P-256: el punto comprimido SEC1 de 33 bytes
+ * (`02`/`03` según la paridad de `y`, seguido de `x`).
+ *
+ * Es imprescindible hashear esto y NO el JWK serializado: el mismo par de llaves
+ * exportado por Node y por el navegador produce strings con los campos en otro
+ * orden (está documentado en dotrino-vault/lib/src/invite.js), así que un id
+ * derivado del string CAMBIARÍA al re-exportar la misma llave. El punto
+ * comprimido depende solo del material de la llave.
  */
-function derivePrefix(pubkey) {
-    const h = crypto.createHash('sha256').update(String(pubkey), 'utf8').digest();
+function canonicalPubkeyBytes(pubkeyJson) {
+    const jwk = typeof pubkeyJson === 'string' ? JSON.parse(pubkeyJson) : pubkeyJson;
+    if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || !jwk.x || !jwk.y) {
+        throw new Error('pubkey no es una JWK EC P-256');
+    }
+    const x = Buffer.from(jwk.x, 'base64url');
+    const y = Buffer.from(jwk.y, 'base64url');
+    if (x.length !== 32 || y.length !== 32) throw new Error('coordenadas de longitud inesperada');
+    const prefix = (y[31] & 1) === 0 ? 0x02 : 0x03;
+    return Buffer.concat([Buffer.from([prefix]), x]);
+}
+
+/**
+ * Id de nodo derivado: base-35 de sha256(punto comprimido), NODE_ID_LEN chars.
+ *
+ * Se hace por conversión de base sobre un entero, no byte a byte con `% 35`:
+ * 256 no es múltiplo de 35, así que el reparto por byte sesga los primeros 11
+ * símbolos un ~14 % — irrelevante para colisiones, pero deja de ser cierto que
+ * el id es uniforme, y sobre esa uniformidad se apoya el cálculo de molido.
+ */
+function deriveNodeId(pubkey) {
+    const h = crypto.createHash('sha256').update(canonicalPubkeyBytes(pubkey)).digest();
+    let n = BigInt('0x' + h.toString('hex'));
+    const base = BigInt(ALLOWED_CHARS.length);
     let out = '';
-    for (let i = 0; i < PREFIX_LEN; i++) out += ALLOWED_CHARS[h[i] % ALLOWED_CHARS.length];
+    for (let i = 0; i < NODE_ID_LEN; i++) {
+        out = ALLOWED_CHARS[Number(n % base)] + out;
+        n /= base;
+    }
     return out;
 }
 
-function isValidPrefix(p) {
-    return typeof p === 'string' && p.length === PREFIX_LEN &&
-        [...p].every((c) => ALLOWED_CHARS.includes(c));
+function isValidNodeId(id) {
+    return typeof id === 'string' && id.length === NODE_ID_LEN &&
+        [...id].every((c) => ALLOWED_CHARS.includes(c));
+}
+
+/** El filtro que viaja en el código corto: los 2 primeros del id de nodo. */
+function hintOf(nodeId) {
+    return typeof nodeId === 'string' ? nodeId.slice(0, CODE_HINT_LEN) : '';
+}
+
+/**
+ * ¿El id que declara este nodo se corresponde con su llave?
+ * Sin esta comprobación el id es una DECLARACIÓN (se lo queda el primero que lo
+ * diga) y hace falta que alguien la valide; con ella es una PRUEBA, y no hay
+ * nada que admitir.
+ */
+function nodeIdMatches(nodeId, pubkey) {
+    try { return isValidNodeId(nodeId) && deriveNodeId(pubkey) === nodeId; }
+    catch (_) { return false; }
 }
 
 /**
@@ -66,15 +122,18 @@ function loadNodeIdentity(dir) {
     const device = raw && raw.device;
     if (!device || !device.publickey || !device.privateJwk) return null;
 
-    const envPrefix = (process.env.PROXY_NODE_PREFIX || '').trim().toUpperCase();
-    if (envPrefix && !isValidPrefix(envPrefix)) {
-        throw new Error(`PROXY_NODE_PREFIX inválido: "${envPrefix}" (esperado ${PREFIX_LEN} caracteres de ${ALLOWED_CHARS})`);
-    }
+    // El id NO se puede fijar a mano. Antes había un `PROXY_NODE_PREFIX` que
+    // ganaba sobre el derivado, y eso apagaba justo la propiedad que sostiene
+    // todo: si el id se declara, alguien tiene que validar la declaración (y de
+    // ahí salía la pregunta de "quién admite un nodo nuevo"). Derivado y
+    // verificado, no hay nada que admitir.
+    const nodeId = deriveNodeId(device.publickey);
 
     return {
         pubkey: device.publickey,             // JWK serializado (string), como en identify
         privateJwk: device.privateJwk,
-        prefix: envPrefix || derivePrefix(device.publickey)
+        nodeId,
+        hint: hintOf(nodeId)
     };
 }
 
@@ -145,10 +204,14 @@ const newNonce = () => crypto.randomBytes(12).toString('base64url');
 
 module.exports = {
     ALLOWED_CHARS,
-    PREFIX_LEN,
+    NODE_ID_LEN,
+    CODE_HINT_LEN,
     canonicalStringify,
-    derivePrefix,
-    isValidPrefix,
+    canonicalPubkeyBytes,
+    deriveNodeId,
+    isValidNodeId,
+    hintOf,
+    nodeIdMatches,
     loadNodeIdentity,
     signBody,
     verifyBody,

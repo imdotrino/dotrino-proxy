@@ -75,9 +75,10 @@ const { serviceDir } = require('./vaultSecrets');
 let nodeIdentity = null;
 try { nodeIdentity = nodeIdentityLib.loadNodeIdentity(serviceDir()); }
 catch (e) { console.error('[fed] identidad de nodo inválida:', e.message); }
-// Las instancias que emite este nodo llevan su prefijo delante: es lo que las
-// hace únicas en todo el ecosistema y ruteables sin preguntarle a nadie.
-tokenManager.setNodePrefix(nodeIdentity && nodeIdentity.prefix);
+// Las instancias que emite este nodo llevan su id delante: es lo que las hace
+// únicas en todo el ecosistema y ruteables sin preguntarle a nadie. El id se
+// DERIVA de la llave del nodo, así que nadie puede usar el ajeno.
+tokenManager.setNodeId(nodeIdentity && nodeIdentity.nodeId);
 const peerRegistry = new PeerRegistry({
     urls: PROXY_PEERS, identity: nodeIdentity, persist, log: (...a) => console.log(...a)
 });
@@ -142,19 +143,18 @@ const mesh = new Mesh({
         try { deliverChannelEvent(payload); }
         catch (e) { console.warn('[mesh] chan-event falló:', e.message); }
     },
-    // El nodo dueño nos contesta el canje que le pedimos.
+    // Un candidato contesta el canje que le pedimos. Se ACUMULAN las respuestas
+    // afirmativas: la decisión se toma con todas, nunca con la primera.
     onPairResult: (payload) => {
         try {
             const { rid } = payload || {};
             const pending = pendingRedeems.get(rid);
-            if (!pending) return;   // ya venció el timeout
-            clearTimeout(pending.timer);
-            pendingRedeems.delete(rid);
-            const response = payload.ok
-                ? { type: 'pair-redeem', ok: true, instance: payload.instance, publickey: payload.publickey || null }
-                : { type: 'pair-redeem', ok: false, error: payload.error || 'canje rechazado' };
-            applyMessageIds(response, pending.message);
-            try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
+            if (!pending) return;   // ya se resolvió o venció el timeout
+            pending.recibidas++;
+            if (payload.ok && payload.instance) {
+                pending.respuestas.push({ instance: payload.instance, pubkey: payload.publickey || null });
+            }
+            if (pending.recibidas >= pending.esperadas) pending.resolver();
         } catch (e) { console.warn('[mesh] pair-result falló:', e.message); }
     }
 });
@@ -235,10 +235,11 @@ function notifyRemotePeersOfDisconnect(instance) {
 
 /** ¿A qué nodo pertenece esta instancia? null = a este (o no se sabe). */
 function ownerNodeOf(instance) {
-    if (!nodeIdentity || typeof instance !== 'string' || instance.length <= nodeIdentityLib.PREFIX_LEN) return null;
-    const prefix = instance.slice(0, nodeIdentityLib.PREFIX_LEN);
-    if (prefix === nodeIdentity.prefix) return null;   // es mía
-    return peerRegistry.byNodePrefix(prefix);          // null si no conozco ese prefijo
+    const L = nodeIdentityLib.NODE_ID_LEN;
+    if (!nodeIdentity || typeof instance !== 'string' || instance.length <= L) return null;
+    const id = instance.slice(0, L);
+    if (id === nodeIdentity.nodeId) return null;   // es mía
+    return peerRegistry.byNodeId(id);              // null si no conozco ese nodo
 }
 
 /**
@@ -258,13 +259,14 @@ function ownerNodeOf(instance) {
  * @returns {{owner:Object|null, local:boolean, known:boolean}}
  */
 function channelOwnerOf(name) {
+    const L = nodeIdentityLib.NODE_ID_LEN;
     if (typeof name !== 'string') return { owner: null, local: true, known: true };
     const sep = name.indexOf('/');
-    if (sep !== nodeIdentityLib.PREFIX_LEN) return { owner: null, local: true, known: true };
-    const prefix = name.slice(0, nodeIdentityLib.PREFIX_LEN);
-    if (!nodeIdentityLib.isValidPrefix(prefix)) return { owner: null, local: true, known: true };
-    if (nodeIdentity && prefix === nodeIdentity.prefix) return { owner: null, local: true, known: true };
-    const peer = peerRegistry.byNodePrefix(prefix);
+    if (sep !== L) return { owner: null, local: true, known: true };
+    const id = name.slice(0, L);
+    if (!nodeIdentityLib.isValidNodeId(id)) return { owner: null, local: true, known: true };
+    if (nodeIdentity && id === nodeIdentity.nodeId) return { owner: null, local: true, known: true };
+    const peer = peerRegistry.byNodeId(id);
     return { owner: peer, local: false, known: !!peer };
 }
 
@@ -1326,9 +1328,9 @@ const server = http.createServer((req, res) => {
     if (req.url === '/peers' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
         res.end(JSON.stringify({
-            self: nodeIdentity ? { prefix: nodeIdentity.prefix } : null,
+            self: nodeIdentity ? { nodeId: nodeIdentity.nodeId, hint: nodeIdentity.hint } : null,
             configured: PROXY_PEERS,
-            peers: peerRegistry.known().map((p) => ({ url: p.url, prefix: p.prefix })),
+            peers: peerRegistry.known().map((p) => ({ url: p.url, nodeId: p.nodeId })),
             mesh: mesh.stats()
         }));
         return;
@@ -1458,7 +1460,7 @@ wss.on('connection', (ws, req) => {
         type: 'connected',
         instance: token,
         token: token,
-        node: nodeIdentity ? nodeIdentity.prefix : null,
+        node: nodeIdentity ? nodeIdentity.nodeId : null,
         timestamp: new Date().toISOString()
     }));
     
@@ -2402,14 +2404,14 @@ wss.on('connection', (ws, req) => {
         const res = pairingCodes.create({
             instance: ws.token,
             pubkey: tokenToPubkey.get(ws.token) || null,
-            nodePrefix: nodeIdentity.prefix,
+            hint: nodeIdentity.hint,
             ttlMs: message.ttlMs
         });
         if (!res) {
             const e = { type: 'error', error: 'no se pudo emitir la cita' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
-        const response = { type: 'pair-code', code: res.code, expiresAt: res.expiresAt, node: nodeIdentity.prefix };
+        const response = { type: 'pair-code', code: res.code, expiresAt: res.expiresAt, node: nodeIdentity.nodeId };
         applyMessageIds(response, message);
         ws.send(JSON.stringify(response));
     }
@@ -2417,9 +2419,16 @@ wss.on('connection', (ws, req) => {
     /**
      * Canjea una cita y devuelve a quién apunta.
      *
-     * Si el prefijo dice que la emitió OTRO nodo, se le pregunta a ESE nodo, no a
-     * la malla entera: un pregón se lo queda el primero que conteste, que es
-     * justo cómo un peer hostil intercepta emparejamientos ajenos.
+     * Los 2 primeros caracteres del código son un FILTRO —los dos primeros del id
+     * del nodo que lo emitió—, no un reclamo exclusivo: puede haber más de un
+     * candidato. Se les pregunta a TODOS los que coincidan (en la práctica, uno)
+     * y se exige que conteste que sí EXACTAMENTE UNO.
+     *
+     * Nunca se elige "el primero que conteste": ahí es donde un nodo hostil se
+     * cuela a quedarse con emparejamientos ajenos. Si contestan dos, se rechaza y
+     * se pide otro código — molesta, pero no entrega a nadie con quien no era.
+     * Y como el filtro sale del id DERIVADO de la llave, un nodo no puede siquiera
+     * figurar como candidato de un código que no le corresponde.
      */
     function handlePairRedeemMessage(ws, message) {
         const raw = message.code;
@@ -2428,10 +2437,13 @@ wss.on('connection', (ws, req) => {
             const e = { type: 'pair-redeem', ok: false, error: 'código vacío' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
-        const prefix = code.slice(0, nodeIdentityLib.PREFIX_LEN);
+        const hint = code.slice(0, nodeIdentityLib.CODE_HINT_LEN);
 
-        // ¿Es de este nodo?
-        if (!nodeIdentity || prefix === nodeIdentity.prefix) {
+        const remotos = nodeIdentity ? peerRegistry.candidatesByHint(hint) : [];
+        const soyCandidato = !nodeIdentity || hint === nodeIdentity.hint;
+
+        // Caso común y barato: solo yo puedo tenerlo.
+        if (soyCandidato && remotos.length === 0) {
             const r = pairingCodes.redeem(code);
             const response = r.error
                 ? { type: 'pair-redeem', ok: false, error: r.error }
@@ -2440,29 +2452,52 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify(response));
             return;
         }
-
-        const owner = peerRegistry.byNodePrefix(prefix);
-        if (!owner) {
-            const e = { type: 'pair-redeem', ok: false, error: 'nodo desconocido para ese código' };
+        if (!soyCandidato && remotos.length === 0) {
+            const e = { type: 'pair-redeem', ok: false, error: 'ningún nodo conocido puede tener ese código' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
+
+        // Hay varios candidatos (o uno remoto): se pregunta a todos y se espera.
         const rid = `r${++redeemSeq}`;
-        const timer = setTimeout(() => {
-            const p = pendingRedeems.get(rid);
-            if (!p) return;
+        const local = soyCandidato ? pairingCodes.redeem(code) : null;
+        const pending = {
+            ws, message,
+            esperadas: remotos.length,
+            respuestas: local && !local.error ? [{ instance: local.instance, pubkey: local.pubkey }] : [],
+            recibidas: 0,
+            timer: null
+        };
+        const resolver = () => {
+            if (!pendingRedeems.has(rid)) return;
             pendingRedeems.delete(rid);
-            const e = { type: 'pair-redeem', ok: false, error: 'el nodo del código no respondió' };
-            applyMessageIds(e, p.message);
-            try { p.ws.send(JSON.stringify(e)); } catch (_) {}
-        }, 6000);
-        if (timer.unref) timer.unref();
-        pendingRedeems.set(rid, { ws, message, timer });
-        if (!mesh.sendTo(owner.pubkey, 'pair-redeem', { rid, code }, { retain: false })) {
-            clearTimeout(timer);
-            pendingRedeems.delete(rid);
-            const e = { type: 'pair-redeem', ok: false, error: 'sin enlace con el nodo del código' };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e));
+            clearTimeout(pending.timer);
+            let response;
+            if (pending.respuestas.length === 1) {
+                const r = pending.respuestas[0];
+                response = { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
+            } else if (pending.respuestas.length > 1) {
+                // Colisión real o un nodo mintiendo. En los dos casos la respuesta
+                // correcta es la misma: no adivinar.
+                response = { type: 'pair-redeem', ok: false, error: 'código ambiguo: pedí uno nuevo' };
+                console.warn(`[pair] código ambiguo (${pending.respuestas.length} nodos dicen tenerlo) — filtro ${hint}`);
+            } else {
+                response = { type: 'pair-redeem', ok: false, error: 'código no válido o ya usado' };
+            }
+            applyMessageIds(response, pending.message);
+            try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
+        };
+        pending.resolver = resolver;
+        pending.timer = setTimeout(resolver, 6000);
+        if (pending.timer.unref) pending.timer.unref();
+        pendingRedeems.set(rid, pending);
+
+        let enviadas = 0;
+        for (const peer of remotos) {
+            if (mesh.sendTo(peer.pubkey, 'pair-redeem', { rid, code }, { retain: false })) enviadas++;
         }
+        pending.esperadas = enviadas;
+        // Si ningún candidato remoto era alcanzable, se resuelve ya con lo local.
+        if (enviadas === 0) resolver();
     }
 
     function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
@@ -2654,7 +2689,7 @@ function start(port = Number(PORT)) {
                 console.error('[fed] ESTE NODO NO TIENE IDENTIDAD (falta vault-service/service-identity.json):');
                 console.error('[fed] no puede firmar ni aceptar tramas s2s. Enrola el nodo: node enroll-vault.js …');
             } else {
-                console.log(`[fed] identidad de nodo lista — prefijo ${nodeIdentity.prefix}`);
+                console.log(`[fed] identidad de nodo lista — id ${nodeIdentity.nodeId}`);
                 const restored = peerRegistry.load();
                 if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
                 peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));

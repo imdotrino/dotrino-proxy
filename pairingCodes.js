@@ -16,11 +16,17 @@
  *     6 caracteres se barre entero; uno que vive 5 minutos y se quema al usarse,
  *     no: hay que acertarlo mientras está vivo y antes que su dueño.
  *
- * La cita lleva delante el PREFIJO DEL NODO que la emitió. Eso hace que sea
- * única en el ecosistema por construcción y —más importante— que quien la recibe
- * sepa A QUÉ NODO preguntarle. Sin el prefijo habría que pregonarla a toda la
- * malla y quedarse con la primera respuesta, que es exactamente cómo se cuela un
- * nodo hostil a quedarse con emparejamientos ajenos.
+ * La cita lleva delante un FILTRO de 2 caracteres: los dos primeros del id del
+ * nodo que la emitió. NO es un reclamo exclusivo — dos nodos pueden compartirlo
+ * sin que importe. Sirve para saber A QUIÉNES preguntarles: quien canjea se
+ * queda con los peers cuyo id empiece así, que en la práctica es uno solo (con
+ * 100 nodos, 1,08 de media).
+ *
+ * La diferencia con pregonar a toda la malla —que es como un nodo hostil se
+ * queda con emparejamientos ajenos— es que el filtro sale del id DERIVADO de la
+ * llave: un nodo no puede contestar por un código cuyo filtro no le corresponde,
+ * y eso es verificable por cualquiera. Si aun así contestan dos que sí, se
+ * rechaza el canje y se pide otro código: nunca se elige "el primero".
  */
 const crypto = require('crypto');
 
@@ -55,8 +61,8 @@ class PairingCodes {
      * Crea (o renueva) la cita de una conexión.
      * @returns {{code:string, expiresAt:number}|null} null si no hay prefijo de nodo.
      */
-    create({ instance, pubkey = null, nodePrefix, ttlMs }) {
-        if (!nodePrefix) return null;
+    create({ instance, pubkey = null, hint, ttlMs }) {
+        if (!hint) return null;
         if (this.codes.size >= MAX_CODES) this.cleanup();
         if (this.codes.size >= MAX_CODES) return null;
 
@@ -68,7 +74,7 @@ class PairingCodes {
         const expiresAt = Date.now() + ttl;
         let code = null;
         for (let i = 0; i < 50; i++) {
-            const candidate = nodePrefix + this._randomBody();
+            const candidate = hint + this._randomBody();
             if (!this.codes.has(candidate)) { code = candidate; break; }
         }
         if (!code) return null;

@@ -156,7 +156,7 @@ class MeshLink {
         ws.on('message', (raw) => {
             let f; try { f = JSON.parse(raw.toString()); } catch (_) { return; }
             if (f.t === 'challenge') {
-                const body = { v: 1, op: 's2s-hello', from: this.identity.pubkey, prefix: this.identity.prefix, nonce: f.nonce, ts: Date.now() };
+                const body = { v: 1, op: 's2s-hello', from: this.identity.pubkey, nodeId: this.identity.nodeId, nonce: f.nonce, ts: Date.now() };
                 this._raw({ t: 'hello', body, signature: signBody(this.identity, body) });
                 return;
             }
@@ -164,7 +164,7 @@ class MeshLink {
                 clearTimeout(helloTimer);
                 this.ready = true;
                 this.backoff = BACKOFF_MIN_MS;
-                this.log(`[mesh] enlace listo con ${this.url} (prefijo ${f.prefix || '?'})`);
+                this.log(`[mesh] enlace listo con ${this.url} (id ${f.nodeId || '?'})`);
                 this._flush();
                 return;
             }
@@ -341,6 +341,20 @@ class Mesh {
         return true;
     }
 
+    /**
+     * Dispara un descubrimiento de peers, como mucho uno cada 2 s. El límite
+     * importa: si no, un desconocido insistente nos haría bajar el `/node` de
+     * todos los peers en bucle.
+     */
+    _kickDiscovery() {
+        const now = Date.now();
+        if (this._lastKick && now - this._lastKick < 2000) return;
+        this._lastKick = now;
+        if (this.registry && typeof this.registry.discoverAll === 'function') {
+            this.registry.discoverAll().catch(() => {});
+        }
+    }
+
     /** ¿Es una conexión entrante de la malla? */
     static isMeshPath(url) {
         return typeof url === 'string' && url.split('?')[0] === S2S_PATH;
@@ -389,6 +403,12 @@ class Mesh {
                 if (!known) {
                     this.log(`[mesh] rechazado: nodo entrante desconocido (no pineado)`);
                     try { ws.close(1008, 'nodo desconocido'); } catch (_) {}
+                    // Que un desconocido toque la puerta es la mejor señal de que
+                    // hay que ir a descubrir: casi siempre es un peer configurado
+                    // que arrancó después que nosotros y al que no alcanzamos a
+                    // pinear. Sin esto había que esperar al refresco periódico, y
+                    // durante ese rato la federación quedaba en un solo sentido.
+                    this._kickDiscovery();
                     return;
                 }
                 if (!verifyBody(body, f.signature, known.pubkey)) {
@@ -403,8 +423,8 @@ class Mesh {
                 if (prev && prev !== ws) { try { prev.close(1000, 'reemplazada'); } catch (_) {} }
                 this.inbound.set(known.pubkey, ws);
                 ws.meshPeer = known;
-                send({ t: 'ready', prefix: this.identity.prefix });
-                this.log(`[mesh] enlace entrante aceptado de ${known.url} (prefijo ${known.prefix})`);
+                send({ t: 'ready', nodeId: this.identity.nodeId });
+                this.log(`[mesh] enlace entrante aceptado de ${known.url} (id ${known.nodeId})`);
                 return;
             }
 

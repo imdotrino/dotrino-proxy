@@ -16,8 +16,8 @@ describe('federación entre dos nodos', () => {
         const portA = await freePort();
         const portB = await freePort();
         [a, b] = await Promise.all([
-            startNode({ name: 'A', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] }),
-            startNode({ name: 'B', dir: dirB, port: portB, prefix: 'M2', peers: [`http://127.0.0.1:${portA}`] })
+            startNode({ name: 'A', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, peers: [`http://127.0.0.1:${portA}`] })
         ]);
         // Esperar al descubrimiento MUTUO (GET /node + pineo). Los dos nodos
         // arrancan a la vez, así que el primero encuentra al otro caído y tiene
@@ -45,22 +45,22 @@ describe('federación entre dos nodos', () => {
     });
 
     describe('anuncio de nodo', () => {
-        it('cada nodo publica un anuncio autofirmado con su prefijo', async () => {
+        it('cada nodo publica un anuncio autofirmado con su id derivado', async () => {
             const res = await fetch(`${a.http}/node`);
             expect(res.status).toBe(200);
             const ann = await res.json();
             expect(ann.body.v).toBe(1);
-            expect(ann.body.prefix).toBe('K7');
+            expect(ann.body.nodeId).toBe(a.nodeId);
             expect(typeof ann.body.pubkey).toBe('string');
             expect(typeof ann.signature).toBe('string');
         });
 
-        it('los dos nodos tienen prefijos distintos', async () => {
+        it('los dos nodos tienen ids distintos', async () => {
             const [annA, annB] = await Promise.all([
                 fetch(`${a.http}/node`).then(r => r.json()),
                 fetch(`${b.http}/node`).then(r => r.json())
             ]);
-            expect(annA.body.prefix).not.toBe(annB.body.prefix);
+            expect(annA.body.nodeId).not.toBe(annB.body.nodeId);
             expect(annA.body.pubkey).not.toBe(annB.body.pubkey);
         });
     });
@@ -143,7 +143,7 @@ describe('federación entre dos nodos', () => {
         it('un mensaje dirigido a una INSTANCIA de otro nodo cruza', async () => {
             // Este era el problema original: un mensaje a la conexión de otro
             // proxio moría en `failedTokens`. Ahora la instancia lleva delante el
-            // prefijo del nodo, así que se lee de ella a quién relayarla.
+            // id del nodo, así que se lee de ella a quién relayarla.
             const ca = await connectTo(a.url);
             const cb = await connectTo(b.url);
             const payload = 'por-instancia-' + Date.now();
@@ -153,12 +153,12 @@ describe('federación entre dos nodos', () => {
             await ca.close(); await cb.close();
         });
 
-        it('la instancia lleva el prefijo del nodo que la emitió', async () => {
+        it('la instancia lleva el id DERIVADO del nodo que la emitió', async () => {
             const ca = await connectTo(a.url);
             const cb = await connectTo(b.url);
-            expect(ca.token.slice(0, 2)).toBe('K7');
-            expect(cb.token.slice(0, 2)).toBe('M2');
-            expect(ca.token).not.toBe(cb.token);
+            expect(ca.token.startsWith(a.nodeId)).toBe(true);
+            expect(cb.token.startsWith(b.nodeId)).toBe(true);
+            expect(a.nodeId).not.toBe(b.nodeId);
             await ca.close(); await cb.close();
         });
 
@@ -176,9 +176,10 @@ describe('federación entre dos nodos', () => {
 
         it('escribirle a una instancia de un nodo desconocido falla', async () => {
             const cb = await connectTo(b.url);
-            cb.send({ to: ['ZZinstanciaDeNadie12345'], message: 'al vacío', id: 'nope-1' });
+            const deNadie = 'ZZZZZZZZZZZZinstanciaDeNadie12345';
+            cb.send({ to: [deNadie], message: 'al vacío', id: 'nope-1' });
             const res = await cb.waitFor((m) => m.type === 'message_sent');
-            expect(res.failed).toContain('ZZinstanciaDeNadie12345');
+            expect(res.failed).toContain(deNadie);
             await cb.close();
         });
     });
