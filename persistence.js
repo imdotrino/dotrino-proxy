@@ -57,6 +57,22 @@ function init(dbFile) {
             pubkey     TEXT PRIMARY KEY,
             updated_at INTEGER NOT NULL
         );
+    `);
+
+    // `peer_nodes` va APARTE del bloque de arriba, y el índice DESPUÉS de la
+    // migración. Estaban juntos y eso tiraba el proceso al arrancar contra una
+    // base existente: `CREATE TABLE IF NOT EXISTS` no hace nada si la tabla ya
+    // está (con el esquema viejo, que tenía `prefix`), y la línea siguiente
+    // creaba un índice sobre `node_id` → "no such column: node_id", antes de que
+    // el código de migración llegara a correr.
+    //
+    // El esquema viejo guardaba un id de nodo DECLARADO en vez de derivado de la
+    // llave. No se migra el contenido: arrastrarlo sería seguir confiando justo
+    // en lo que dejó de valer, y los pineos se rehacen solos en el siguiente
+    // descubrimiento (segundos).
+    const peerCols = db.prepare('PRAGMA table_info(peer_nodes)').all().map((c) => c.name);
+    if (peerCols.length && !peerCols.includes('node_id')) db.exec('DROP TABLE peer_nodes;');
+    db.exec(`
         CREATE TABLE IF NOT EXISTS peer_nodes (
             url        TEXT PRIMARY KEY,
             pubkey     TEXT NOT NULL,
@@ -66,26 +82,6 @@ function init(dbFile) {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_peer_node_id ON peer_nodes(node_id);
     `);
-    // El esquema viejo tenía una columna `prefix` (el id de nodo se DECLARABA en
-    // vez de derivarse de la llave). No se migra: los pineos se rehacen solos en
-    // el siguiente descubrimiento, y arrastrar ids declarados sería seguir
-    // confiando justo en lo que dejó de valer.
-    try {
-        const cols = db.prepare('PRAGMA table_info(peer_nodes)').all().map((c) => c.name);
-        if (cols.includes('prefix') && !cols.includes('node_id')) {
-            db.exec('DROP TABLE peer_nodes;');
-            db.exec(`
-                CREATE TABLE peer_nodes (
-                    url        TEXT PRIMARY KEY,
-                    pubkey     TEXT NOT NULL,
-                    node_id    TEXT NOT NULL,
-                    pinned_at  INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
-                );
-                CREATE UNIQUE INDEX idx_peer_node_id ON peer_nodes(node_id);
-            `);
-        }
-    } catch (_) { /* base nueva: nada que migrar */ }
     return db;
 }
 
