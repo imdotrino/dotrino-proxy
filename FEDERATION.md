@@ -18,29 +18,51 @@ llega aunque el destinatario esté en OTRO proxio.
   entrega si está online, o encola si es el home; si no, descarta (no acumula en
   intermedios). **Sin re-reenvío → sin loops.**
 - **Config**: `PROXY_PEERS=https://peer1,https://peer2` (allowlist).
-  Apagado sin `PROXY_PEERS` (single-node). Ver también `PROXY_PUBLIC_URL` y
-  `PROXY_NODE_PREFIX` en `.env.example`.
+  Apagado sin `PROXY_PEERS` (single-node). Ver también `PROXY_PUBLIC_URL` en
+  `.env.example`. **`PROXY_NODE_PREFIX` ya no existe**: el id sale de la llave.
 - **Seguridad**: el payload va E2E + firmado → los proxios son tránsito ciego.
   Firma de identidad estricta (no acepta inválidas).
 
-### Identidad de nodo (quién es cada proxio)
+### Identidad de nodo: el id se DERIVA de la llave
 Cada nodo tiene una **llave propia** —la del vault, `vault-service/service-identity.json`,
-la misma con la que está enrolado— y la usa para hablar con los demás:
+la misma con la que está enrolado— y su **id sale de esa llave**:
 
-- **`GET /node`** — anuncio **autofirmado**: `{body:{v,prefix,pubkey,url,ts,nonce}, signature}`.
-- **Pineo (TOFU)**: al arrancar, cada nodo baja el `/node` de sus peers y lo
-  **pinea** en SQLite (`peer_nodes`). Si después ese URL cambia de pubkey, o si
-  otra pubkey reclama un prefijo ya tomado, **se rechaza y se grita en el log**:
-  un takeover silencioso de prefijo sería secuestrar el espacio de nombres de
-  otro nodo entero. Un cambio legítimo de llave se hace a mano.
+```
+llave pública → punto comprimido SEC1 (33 bytes) → sha256 → base-35 → 12 caracteres
+```
+
+Esto es lo que responde la pregunta *"¿quién acepta a un proxio nuevo en la
+red?"*: **nadie tiene que aceptarlo**. Como el id se recalcula de la llave y se
+**verifica al recibirlo**, usar el id de otro exige su llave privada. Lo único
+que se acepta o no es una **arista** —con quién federo—, y eso lo decide cada
+operador para sí mismo, que es lo único compatible con "cualquiera puede
+autohospedar".
+
+> Antes el id eran 2 caracteres que el proxio **declaraba** (`PROXY_NODE_PREFIX`)
+> y nadie verificaba: se lo quedaba el primero que lo dijera. Además no había
+> ancho que sirviera — 1.225 valores chocan entre nodos honestos con 21 % de
+> probabilidad ya a los 25 nodos, y como las identidades de nodo son gratis,
+> acaparar el espacio entero costaba **0,1 s** de generar llaves.
+
+- **Se hashea la forma CANÓNICA, no el JWK serializado.** El mismo par de llaves
+  exportado por Node y por el navegador produce strings con los campos en otro
+  orden, así que un id derivado del string cambiaría al re-exportar la misma
+  llave.
+- **`GET /node`** — anuncio **autofirmado**: `{body:{v,nodeId,pubkey,url,ts,nonce}, signature}`.
+- **Pineo**: al arrancar, cada nodo baja el `/node` de sus peers, **comprueba que
+  el id se deriva de la pubkey** y lo pinea en SQLite (`peer_nodes`). Si ese URL
+  vuelve con otra pubkey, se rechaza y se grita en el log: un cambio legítimo de
+  llave es justo cuando el operador quiere enterarse.
 - **`POST /federate`** exige un sobre **firmado por un peer pineado**, con `ts` +
   `nonce` (ventana ±5 min y memoria de nonces) para cerrar el replay.
 - **Descubrimiento adaptativo**: mientras falte algún peer por pinear reintenta
-  cada 15 s; con todos pineados pasa a 10 min. Con un intervalo fijo largo, un
+  cada 15 s; con todos pineados pasa a 10 min. Además, un `hello` de un nodo
+  desconocido dispara un descubrimiento inmediato (con tope de uno cada 2 s):
+  casi siempre es un peer configurado que arrancó después. Con un intervalo fijo largo, un
   deploy simultáneo dejaba la federación andando **en un solo sentido** (A tenía
   pineado a B pero B no a A) durante 10 minutos, que es peor que no andar porque
   no se nota.
-- **`GET /peers`** — diagnóstico: mi prefijo, los peers configurados, los
+- **`GET /peers`** — diagnóstico: mi id, los peers configurados, los
   pineados y el estado de cada enlace de la malla. Es lo primero que hay que
   mirar cuando "a veces no llegan".
 
@@ -88,7 +110,8 @@ El transporte entre nodos es un **WebSocket por peer**, no un POST por mensaje:
 
 ### Cómo agregar un nodo
 1. Levantar el proxio (systemd o Docker; ver `SELF-HOSTING.md`).
-2. Cruzar `PROXY_PEERS` con los demás nodos + mismo `PROXY_FEDERATION_TOKEN`.
+2. Cruzar `PROXY_PEERS` con los demás nodos. No hay ningún secreto que
+   compartir: cada nodo se identifica firmando con su llave.
 3. Agregarlo a `nodes.json` (commit al repo del catálogo `dotrino`).
 → Los clientes lo descubren, lo eligen por latencia, le hacen failover.
 

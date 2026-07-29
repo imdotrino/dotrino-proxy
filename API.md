@@ -36,39 +36,46 @@ Ahora son dos cosas:
 | | Instancia | Cita |
 |---|---|---|
 | Para qué | direccionar (`to:`) | que una persona la lea/dicte/escanee |
-| Forma | `<2 chars de nodo><22 base64url>` | `<2 chars de nodo><4>` = 6 caracteres |
+| Forma | `<id de nodo, 12><22 base64url>` | `<filtro, 2><4 al azar>` = 6 caracteres |
 | La ve un humano | nunca | sí |
 | Vida | la de la conexión | minutos, **un solo uso** |
-| Unicidad | por construcción (prefijo de nodo) | por construcción (prefijo de nodo) |
+| Unicidad | por construcción (id derivado de la llave) | detectada al canjear |
 
-El `connected` trae `instance` (y `node`, el prefijo del proxio). `token` sigue
+El `connected` trae `instance` (y `node`, el id del proxio). `token` sigue
 llegando con el mismo valor por compatibilidad de nombre.
 
-Un mensaje `to: ["<instancia>"]` de otro proxio **cruza la malla**: el prefijo
-dice a qué nodo relayarlo, sin preguntarle a nadie. Si el prefijo no corresponde
-a ningún nodo conocido, se responde `failed`.
+Un mensaje `to: ["<instancia>"]` de otro proxio **cruza la malla**: el id de
+nodo que lleva delante dice a quién relayarlo, sin preguntarle a nadie. Si ese id
+no corresponde a ningún nodo conocido, se responde `failed`.
 
 ### Citas: `pair-code` y `pair-redeem`
 
 ```json
 → { "type": "pair-code", "ttlMs": 300000 }
-← { "type": "pair-code", "code": "K7M2Q9", "expiresAt": 1750000000000, "node": "K7" }
+← { "type": "pair-code", "code": "K7M2Q9", "expiresAt": 1750000000000, "node": "3PQ2QE8ZMD8J" }
 
 → { "type": "pair-redeem", "code": "k7m2-q9" }
 ← { "type": "pair-redeem", "ok": true, "instance": "K7…", "publickey": "<JWK>" }
 ```
 
-El código se acepta en minúsculas y con espacios o guiones. Si lo emitió otro
-proxio, este le pregunta **a ese proxio** (por el prefijo), no a la malla entera:
-un pregón se lo queda el primero que conteste, que es como un nodo hostil se
-mete en emparejamientos ajenos.
+El código se acepta en minúsculas y con espacios o guiones.
+
+Los 2 primeros caracteres son un **filtro** —los dos primeros del id del proxio
+que lo emitió—, no un reclamo exclusivo: dos proxios pueden compartirlo. Se le
+pregunta a **todos** los candidatos (en la práctica, uno: con 100 nodos, 1,08 de
+media) y se exige que conteste que sí **exactamente uno**. Si contestan dos, se
+rechaza y se pide otro código.
+
+Nunca se elige "el primero que conteste": ahí es donde un nodo hostil se mete en
+emparejamientos ajenos. Y como el filtro sale del id **derivado** de la llave, un
+nodo no puede siquiera figurar como candidato de un código que no le toca.
 
 Desde `@dotrino/proxy-client`: `requestPairingCode()` y `redeemPairingCode(code)`.
 
 ## Canales con nodo dueño
 
-Un canal puede llevar delante el prefijo del proxio que lo hospeda:
-**`K7/mesa-42`**. Ese nodo guarda la membresía y los demás le pasan las
+Un canal puede llevar delante el **id** del proxio que lo hospeda:
+**`3PQ2QE8ZMD8J/mesa-42`**. Ese nodo guarda la membresía y los demás le pasan las
 operaciones (`publish`, `unpublish`, `list`, `channel_count`, `watch`). Así un
 servicio vive siempre en el mismo proxio y **dos personas en nodos distintos
 aparecen en la misma lista**.
@@ -77,8 +84,8 @@ Los eventos del canal (`joined` / `left` / `disconnected`) llegan también a los
 miembros que están en otro nodo, por la malla. Sin eso, el que estaba en otro
 proxio nunca se enteraba de las altas y bajas y se le quedaba la sala congelada.
 
-Un canal **sin prefijo** es local a cada nodo, como siempre. Un canal con un
-prefijo que no corresponde a ningún nodo conocido responde **error**, no una
+Un canal **sin id de nodo** es local a cada nodo, como siempre. Un canal con un
+id que no corresponde a ningún nodo conocido responde **error**, no una
 lista vacía: una lista vacía se confunde con "no hay nadie".
 
 > Por qué dueño y no consulta a todos: preguntarle a la malla entera hace que el
