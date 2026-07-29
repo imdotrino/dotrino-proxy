@@ -65,6 +65,27 @@ mete en emparejamientos ajenos.
 
 Desde `@dotrino/proxy-client`: `requestPairingCode()` y `redeemPairingCode(code)`.
 
+## Canales con nodo dueño
+
+Un canal puede llevar delante el prefijo del proxio que lo hospeda:
+**`K7/mesa-42`**. Ese nodo guarda la membresía y los demás le pasan las
+operaciones (`publish`, `unpublish`, `list`, `channel_count`, `watch`). Así un
+servicio vive siempre en el mismo proxio y **dos personas en nodos distintos
+aparecen en la misma lista**.
+
+Los eventos del canal (`joined` / `left` / `disconnected`) llegan también a los
+miembros que están en otro nodo, por la malla. Sin eso, el que estaba en otro
+proxio nunca se enteraba de las altas y bajas y se le quedaba la sala congelada.
+
+Un canal **sin prefijo** es local a cada nodo, como siempre. Un canal con un
+prefijo que no corresponde a ningún nodo conocido responde **error**, no una
+lista vacía: una lista vacía se confunde con "no hay nadie".
+
+> Por qué dueño y no consulta a todos: preguntarle a la malla entera hace que el
+> coste de cada consulta crezca con el número de nodos, y que **cada peer se
+> entere de quién está en qué canal** aunque no tenga a nadie ahí. Con dueño, esa
+> metadata la ve un solo nodo — el que el propio servicio eligió.
+
 ## Mensajes
 
 ### Mensajes efímeros (`ephemeral`)

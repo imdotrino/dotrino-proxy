@@ -120,6 +120,28 @@ const mesh = new Mesh({
             { retain: false });
         } catch (e) { console.warn('[mesh] pair-redeem falló:', e.message); }
     },
+    // Un peer opera sobre un canal del que NOSOTROS somos dueños.
+    onChanOp: (payload, link) => {
+        try { handleRemoteChannelOp(payload, link); }
+        catch (e) { console.warn('[mesh] chan-op falló:', e.message); }
+    },
+    // El nodo dueño contesta la operación de canal que le pedimos.
+    onChanResult: (payload) => {
+        try {
+            const pending = pendingChanOps.get(payload && payload.rid);
+            if (!pending) return;   // ya venció el timeout
+            clearTimeout(pending.timer);
+            pendingChanOps.delete(payload.rid);
+            const response = { ...payload.frame };
+            applyMessageIds(response, pending.message);
+            try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
+        } catch (e) { console.warn('[mesh] chan-result falló:', e.message); }
+    },
+    // El nodo dueño nos manda un evento de canal para una conexión nuestra.
+    onChanEvent: (payload) => {
+        try { deliverChannelEvent(payload); }
+        catch (e) { console.warn('[mesh] chan-event falló:', e.message); }
+    },
     // El nodo dueño nos contesta el canje que le pedimos.
     onPairResult: (payload) => {
         try {
@@ -217,6 +239,135 @@ function ownerNodeOf(instance) {
     const prefix = instance.slice(0, nodeIdentityLib.PREFIX_LEN);
     if (prefix === nodeIdentity.prefix) return null;   // es mía
     return peerRegistry.byNodePrefix(prefix);          // null si no conozco ese prefijo
+}
+
+/**
+ * ¿A qué nodo pertenece este CANAL?
+ *
+ * Un canal puede llevar delante el prefijo del nodo dueño: `P1/mesa-42`. Ese
+ * nodo es el único que guarda su membresía, y los demás le pasan las operaciones
+ * (publicar, listar, contar). Así un servicio vive siempre en el mismo proxio y
+ * dos personas en nodos distintos SÍ se ven en la misma lista.
+ *
+ * La alternativa —que cada nodo pregunte a todos y mezcle— tiene dos problemas:
+ * el coste de cada consulta crece con la malla, y cada nodo peer se entera de
+ * quién está en qué canal aunque no tenga a nadie ahí. Con dueño, esa metadata
+ * la ve un solo nodo: el que el propio servicio eligió.
+ *
+ * Un canal SIN prefijo es local, como siempre.
+ * @returns {{owner:Object|null, local:boolean, known:boolean}}
+ */
+function channelOwnerOf(name) {
+    if (typeof name !== 'string') return { owner: null, local: true, known: true };
+    const sep = name.indexOf('/');
+    if (sep !== nodeIdentityLib.PREFIX_LEN) return { owner: null, local: true, known: true };
+    const prefix = name.slice(0, nodeIdentityLib.PREFIX_LEN);
+    if (!nodeIdentityLib.isValidPrefix(prefix)) return { owner: null, local: true, known: true };
+    if (nodeIdentity && prefix === nodeIdentity.prefix) return { owner: null, local: true, known: true };
+    const peer = peerRegistry.byNodePrefix(prefix);
+    return { owner: peer, local: false, known: !!peer };
+}
+
+// Operaciones de canal esperando respuesta del nodo dueño: rid -> {ws, message, timer}
+const pendingChanOps = new Map();
+let chanOpSeq = 0;
+
+/**
+ * Manda una operación de canal al nodo dueño y contesta al cliente cuando llega
+ * la respuesta. Si el enlace no está o el dueño no contesta, se responde error:
+ * quedarse callado dejaría al cliente esperando para siempre.
+ */
+function forwardChannelOp(ws, message, owner, op, payload) {
+    const rid = `c${++chanOpSeq}`;
+    const timer = setTimeout(() => {
+        const p = pendingChanOps.get(rid);
+        if (!p) return;
+        pendingChanOps.delete(rid);
+        const e = { type: 'error', error: `el nodo dueño del canal no respondió (${op})` };
+        applyMessageIds(e, p.message);
+        try { p.ws.send(JSON.stringify(e)); } catch (_) {}
+    }, 6000);
+    if (timer.unref) timer.unref();
+    pendingChanOps.set(rid, { ws, message, timer });
+    if (!mesh.sendTo(owner.pubkey, 'chan-op', { rid, op, ...payload }, { retain: false })) {
+        clearTimeout(timer);
+        pendingChanOps.delete(rid);
+        const e = { type: 'error', error: 'sin enlace con el nodo dueño del canal' };
+        applyMessageIds(e, message);
+        try { ws.send(JSON.stringify(e)); } catch (_) {}
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Somos el DUEÑO del canal y un peer nos pide operar sobre él en nombre de una
+ * conexión suya. La instancia que nos pasa es direccionable desde cualquier
+ * nodo, así que se guarda tal cual: para el resto de los miembros es un miembro
+ * más, y escribirle funciona igual que si fuera local.
+ */
+function handleRemoteChannelOp(payload, link) {
+    const { rid, op, channel, instance } = payload || {};
+    const reply = (frame) => link.send('chan-result', { rid, frame }, { retain: false });
+    const timestamp = new Date().toISOString();
+
+    if (op === 'publish') {
+        if (typeof instance !== 'string') return reply({ type: 'error', error: 'publish sin instancia' });
+        addToPublicChannel(channel, instance);
+        notifyChannelMembersOfJoin(instance, channel);
+        return reply({ type: 'published', channel, timestamp });
+    }
+    if (op === 'unpublish') {
+        removeFromPublicChannel(channel, instance);
+        notifyChannelMembersOfLeave(instance, channel);
+        return reply({ type: 'unpublished', channel, timestamp });
+    }
+    if (op === 'watch') {
+        let set = channelWatchers.get(channel);
+        if (!set) { set = new Set(); channelWatchers.set(channel, set); }
+        set.add(instance);
+        const tokens = getChannelTokens(channel);
+        return reply({ type: 'watched', channel, tokens, count: tokens.length, timestamp });
+    }
+    if (op === 'unwatch') {
+        const set = channelWatchers.get(channel);
+        if (set) { set.delete(instance); if (set.size === 0) channelWatchers.delete(channel); }
+        return reply({ type: 'unwatched', channel, timestamp });
+    }
+    if (op === 'list') {
+        const tokens = getChannelTokens(channel);
+        return reply({ type: 'channel_list', channel, tokens, count: tokens.length, maxEntries: MAX_CHANNEL_ENTRIES, timestamp });
+    }
+    if (op === 'count') {
+        const tokens = getChannelTokens(channel);
+        return reply({ type: 'channel_count', channel, count: tokens.length, maxEntries: MAX_CHANNEL_ENTRIES, timestamp });
+    }
+    reply({ type: 'error', error: `operación de canal desconocida: ${op}` });
+}
+
+/** Entrega a una conexión local un frame de canal que mandó el nodo dueño. */
+function deliverChannelEvent(payload) {
+    const { toInstance, frame } = payload || {};
+    if (typeof toInstance !== 'string' || !frame) return;
+    const conn = activeConnections.get(toInstance);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return;
+    try { conn.ws.send(JSON.stringify(frame)); } catch (_) {}
+}
+
+/**
+ * Manda un frame de canal a un miembro, esté donde esté. Si la instancia es de
+ * otro nodo, va por la malla. Es lo que hace que un miembro remoto se entere de
+ * las altas y bajas: sin esto, el que está en otro proxio nunca recibía
+ * `joined`/`left`/`disconnected` y se le quedaba la sala congelada.
+ */
+function sendChannelFrameTo(instance, frame) {
+    const conn = activeConnections.get(instance);
+    if (conn && conn.ws.readyState === WebSocket.OPEN) {
+        try { conn.ws.send(JSON.stringify(frame)); return true; } catch (_) { return false; }
+    }
+    const owner = ownerNodeOf(instance);
+    if (!owner) return false;
+    return mesh.sendTo(owner.pubkey, 'chan-event', { toInstance: instance, frame }, { retain: false });
 }
 // "Soy el home de estas pubkeys" (identificaron acá). Set en RAM + respaldo SQLite.
 const homePubkeys = new Set(persist.loadHomes(Date.now() - HOME_TTL_MS));
@@ -795,10 +946,7 @@ function notifyWatchers(channelName, frame, excludeToken) {
     let notified = 0;
     for (const watcherToken of set) {
         if (watcherToken === excludeToken) continue;
-        const conn = activeConnections.get(watcherToken);
-        if (conn && conn.ws.readyState === WebSocket.OPEN) {
-            try { conn.ws.send(JSON.stringify(frame)); notified++; } catch (_) {}
-        }
+        if (sendChannelFrameTo(watcherToken, frame)) notified++;
     }
     return notified;
 }
@@ -813,17 +961,10 @@ function notifyChannelMembersOfJoin(joiningToken, channelName) {
 
     for (const entry of entries) {
         if (entry.token === joiningToken) continue;
-
-        const conn = activeConnections.get(entry.token);
-        if (conn && conn.ws.readyState === WebSocket.OPEN) {
-            conn.ws.send(JSON.stringify({
-                type: 'joined',
-                token: joiningToken,
-                channel: channelName,
-                timestamp
-            }));
-            notified++;
-        }
+        // Puede ser un miembro de OTRO nodo: el frame sale por la malla.
+        if (sendChannelFrameTo(entry.token, {
+            type: 'joined', token: joiningToken, channel: channelName, timestamp
+        })) notified++;
     }
 
     return notified;
@@ -840,17 +981,9 @@ function notifyChannelMembersOfLeave(leavingToken, channelName) {
 
     for (const entry of entries) {
         if (entry.token === leavingToken) continue;
-
-        const conn = activeConnections.get(entry.token);
-        if (conn && conn.ws.readyState === WebSocket.OPEN) {
-            conn.ws.send(JSON.stringify({
-                type: 'left',
-                token: leavingToken,
-                channel: channelName,
-                timestamp
-            }));
-            notified++;
-        }
+        if (sendChannelFrameTo(entry.token, {
+            type: 'left', token: leavingToken, channel: channelName, timestamp
+        })) notified++;
     }
 
     return notified;
@@ -874,14 +1007,12 @@ function notifyChannelMembersOfDisconnect(disconnectedToken) {
         for (const entry of entries) {
             if (entry.token === disconnectedToken) continue;
 
-            const conn = activeConnections.get(entry.token);
-            if (conn && conn.ws.readyState === WebSocket.OPEN) {
-                conn.ws.send(JSON.stringify({
-                    type: 'disconnected',
-                    token: disconnectedToken,
-                    channel: channelName,
-                    timestamp
-                }));
+            if (sendChannelFrameTo(entry.token, {
+                type: 'disconnected',
+                token: disconnectedToken,
+                channel: channelName,
+                timestamp
+            })) {
                 notified.add(entry.token);
             }
         }
@@ -1602,14 +1733,29 @@ wss.on('connection', (ws, req) => {
         }
         
         const channelName = validation.channelName;
-        
+
+        // Canal de otro nodo: la membresía la guarda su dueño, así que le
+        // mandamos la publicación con NUESTRA instancia (que es direccionable
+        // desde cualquier nodo, así que los demás miembros pueden escribirnos).
+        const home = channelOwnerOf(channelName);
+        if (!home.local) {
+            if (!home.known) {
+                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            forwardChannelOp(ws, message, home.owner, 'publish', { channel: channelName, instance: token });
+            const conn0 = activeConnections.get(token);
+            if (conn0) { conn0.channel = channelName; conn0.channelData = channelData; conn0.remoteChannelOwner = home.owner.pubkey; }
+            return;
+        }
+
         // Actualizar canal del cliente
         const conn = activeConnections.get(token);
         if (conn) {
             conn.channel = channelName;
             conn.channelData = channelData; // Almacenar datos completos del canal
         }
-        
+
         // Agregar a la lista pública del canal
         addToPublicChannel(channelName, token);
 
@@ -1693,7 +1839,18 @@ wss.on('connection', (ws, req) => {
         }
         
         const channelName = validation.channelName;
-        
+
+        // ¿El canal es de otro nodo? La membresía la guarda su dueño.
+        const home = channelOwnerOf(channelName);
+        if (!home.local) {
+            if (!home.known) {
+                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            forwardChannelOp(ws, message, home.owner, 'list', { channel: channelName });
+            return;
+        }
+
         // Obtener tokens del canal (ya filtrados por expiración)
         const tokens = getChannelTokens(channelName);
         
@@ -1724,6 +1881,17 @@ wss.on('connection', (ws, req) => {
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const channelName = validation.channelName;
+        const home = channelOwnerOf(channelName);
+        if (!home.local) {
+            if (!home.known) {
+                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            // El registro de observadores lo lleva el dueño, igual que la
+            // membresía; los eventos vuelven por la malla (`chan-event`).
+            forwardChannelOp(ws, message, home.owner, 'watch', { channel: channelName, instance: token });
+            return;
+        }
         let set = channelWatchers.get(channelName);
         if (!set) { set = new Set(); channelWatchers.set(channelName, set); }
         set.add(token);
@@ -1782,6 +1950,16 @@ wss.on('connection', (ws, req) => {
             };
             applyMessageIds(errorResponse, message);
             ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+
+        const home = channelOwnerOf(channelName);
+        if (!home.local) {
+            if (!home.known) {
+                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            forwardChannelOp(ws, message, home.owner, 'count', { channel: channelName });
             return;
         }
 

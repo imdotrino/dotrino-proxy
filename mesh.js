@@ -185,7 +185,9 @@ class MeshLink {
 
 /** La malla completa: enlaces salientes + atención de los entrantes. */
 class Mesh {
-    constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onPeerGone, onPairRedeem, onPairResult, log = console.log } = {}) {
+    constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onPeerGone,
+                  onPairRedeem, onPairResult, onChanOp, onChanResult, onChanEvent,
+                  log = console.log } = {}) {
         this.identity = identity;
         this.registry = registry;
         this.onDeliver = onDeliver;
@@ -193,6 +195,9 @@ class Mesh {
         this.onPeerGone = onPeerGone || (() => {});
         this.onPairRedeem = onPairRedeem || (() => {});
         this.onPairResult = onPairResult || (() => {});
+        this.onChanOp = onChanOp || (() => {});
+        this.onChanResult = onChanResult || (() => {});
+        this.onChanEvent = onChanEvent || (() => {});
         this.log = log;
         this.links = new Map();     // url -> MeshLink
         this.inbound = new Map();   // pubkey del peer -> ws entrante
@@ -240,6 +245,9 @@ class Mesh {
         else if (frame.op === 'peer-gone') this.onPeerGone(frame.payload, link);
         else if (frame.op === 'pair-redeem') this.onPairRedeem(frame.payload, link);
         else if (frame.op === 'pair-result') this.onPairResult(frame.payload, link);
+        else if (frame.op === 'chan-op') this.onChanOp(frame.payload, link);
+        else if (frame.op === 'chan-result') this.onChanResult(frame.payload, link);
+        else if (frame.op === 'chan-event') this.onChanEvent(frame.payload, link);
     }
 
     /** Enlace SALIENTE hacia el nodo con esa pubkey (o null). */
