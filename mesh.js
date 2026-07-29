@@ -158,14 +158,18 @@ class MeshLink {
      * sale en cuanto vuelve (hasta RETAIN_MAX; más allá se tira lo más viejo,
      * que es preferible a crecer sin límite con un peer muerto).
      */
-    send(op, payload) {
+    send(op, payload, { retain = true } = {}) {
         const seq = ++this.seq;
         const frame = { t: 'msg', seq, op, payload };
-        if (this.retain.size >= RETAIN_MAX) {
-            const oldest = this.retain.keys().next().value;
-            this.retain.delete(oldest);
+        // `retain:false` para tráfico efímero: si el enlace está caído no tiene
+        // sentido guardarlo, porque para cuando vuelva ya no sirve.
+        if (retain) {
+            if (this.retain.size >= RETAIN_MAX) {
+                const oldest = this.retain.keys().next().value;
+                this.retain.delete(oldest);
+            }
+            this.retain.set(seq, frame);
         }
-        this.retain.set(seq, frame);
         this.stats.sent++;
         if (this.ready) this._raw(frame);
         return seq;
@@ -217,10 +221,10 @@ class Mesh {
      * Manda una entrega a todos los peers por la malla. Devuelve cuántos enlaces
      * la aceptaron EN VIVO (los caídos la guardan para cuando vuelvan).
      */
-    broadcastDeliver(payload) {
+    broadcastDeliver(payload, opts = {}) {
         let live = 0;
         for (const l of this.links.values()) {
-            l.send('deliver', payload);
+            l.send('deliver', payload, opts);
             if (l.ready) live++;
         }
         return live;

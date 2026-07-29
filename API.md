@@ -24,6 +24,25 @@ Al conectarse, el servidor responde con:
 
 ## Mensajes
 
+### Mensajes efímeros (`ephemeral`)
+Un mensaje dirigido por `to_publickey` se **encola hasta 24 h** si el
+destinatario no está conectado. Eso es lo correcto para un chat y es veneno para
+el tráfico de tiempo real: una jugada de una partida o una oferta SDP entregadas
+al día siguiente no llegan tarde, llegan **mal** (reinician negociaciones
+imposibles y muestran movimientos fuera de contexto).
+
+Marcá esos mensajes con `ephemeral: true`: se entregan si el destinatario está
+en ese momento (en este nodo o en otro de la malla) y, si no, **se descartan**.
+
+```json
+{ "to_publickey": ["<JWK string>"], "message": "…", "ephemeral": true }
+```
+
+La respuesta `message_sent` trae `dropped: [pubkey…]` en vez de `queued`, para
+que la app distinga "no se guardó" de "falló" y de "quedó encolado".
+
+Desde `@dotrino/proxy-client`: `client.sendByPubkey(pk, payload, { ephemeral: true })`.
+
 ### Campos ID (opcionales)
 Los mensajes pueden incluir campos `id` o `messageId` (o ambos) para correlacionar solicitudes con respuestas. Si se incluyen en el mensaje de solicitud, el servidor los incluirá en la respuesta correspondiente.
 
