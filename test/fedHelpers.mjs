@@ -148,7 +148,17 @@ export function connectTo(url) {
                         const timer = setTimeout(() => rej(new Error(`timeout esperando; recibido: ${JSON.stringify(recv)}`)), ms);
                         listeners.push({ pred, done: (msg) => { clearTimeout(timer); res(msg); } });
                     }),
-                    close: () => new Promise((res) => { ws.once('close', res); ws.close(); })
+                    // `close()` hace el handshake de cierre y espera la respuesta
+                    // del servidor. Si el servidor ya está muerto (los tests lo
+                    // matan a propósito) esa respuesta no llega nunca y `ws` se
+                    // queda esperando su timeout de 30 s: por eso, si no cierra
+                    // rápido, se termina a la fuerza.
+                    close: () => new Promise((res) => {
+                        if (ws.readyState === WebSocket.CLOSED) return res();
+                        const t = setTimeout(() => { try { ws.terminate(); } catch (_) {} res(); }, 800);
+                        ws.once('close', () => { clearTimeout(t); res(); });
+                        try { ws.close(); } catch (_) { clearTimeout(t); res(); }
+                    })
                 });
             }
         });

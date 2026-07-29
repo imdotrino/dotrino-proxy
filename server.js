@@ -79,6 +79,24 @@ const peerRegistry = new PeerRegistry({
     urls: PROXY_PEERS, identity: nodeIdentity, persist, log: (...a) => console.log(...a)
 });
 const s2sReplay = new nodeIdentityLib.ReplayWindow();
+
+// Malla s2s: un WebSocket persistente por peer. Es el camino PRINCIPAL de la
+// federación; `POST /federate` queda como reserva para cuando el enlace está
+// caído (y para peers que aún no lo hablen).
+const { Mesh } = require('./mesh');
+const mesh = new Mesh({
+    urls: PROXY_PEERS,
+    identity: nodeIdentity,
+    registry: peerRegistry,
+    log: (...a) => console.log(...a),
+    onDeliver: (payload) => {
+        try {
+            const { toPubkey, fromPubkey, message, queuedAt, expiresAt } = payload || {};
+            if (typeof toPubkey !== 'string' || message === undefined) return;
+            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt);
+        } catch (e) { console.warn('[mesh] entrega federada falló:', e.message); }
+    }
+});
 // "Soy el home de estas pubkeys" (identificaron acá). Set en RAM + respaldo SQLite.
 const homePubkeys = new Set(persist.loadHomes(Date.now() - HOME_TTL_MS));
 function registerHome(pubkey) {
@@ -96,6 +114,22 @@ function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(p
 function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt) {
     if (!PROXY_PEERS.length) return;
     if (!nodeIdentity) return;  // sin identidad no se puede firmar → no se federa
+
+    // Camino principal: la malla. Va ordenado por socket, con acuse y reenvío
+    // tras reconectar, y funciona aunque el peer esté detrás de NAT.
+    //
+    // Se usa TAMBIÉN con el enlace caído, a propósito: el link guarda la trama y
+    // la manda al reconectar. Preguntar `anyReady()` y caer al POST cuando el
+    // peer estaba abajo era justo lo contrario de lo que hace falta — el POST
+    // fallaba contra un peer muerto y la trama no quedaba en ningún buffer, así
+    // que el mensaje solo existía en la cola local del emisor, donde el
+    // destinatario (que vive en OTRO nodo) no lo iba a ver nunca.
+    if (mesh.hasLinks()) {
+        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt });
+        return;
+    }
+
+    // Reserva: POST firmado, para peers configurados sin enlace de malla.
     const body = {
         v: 1, op: 'deliver',
         from: nodeIdentity.pubkey,
@@ -1038,7 +1072,8 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             self: nodeIdentity ? { prefix: nodeIdentity.prefix } : null,
             configured: PROXY_PEERS,
-            peers: peerRegistry.known().map((p) => ({ url: p.url, prefix: p.prefix }))
+            peers: peerRegistry.known().map((p) => ({ url: p.url, prefix: p.prefix })),
+            mesh: mesh.stats()
         }));
         return;
     }
@@ -1116,6 +1151,13 @@ function startVaultSecretsLoop(log = console.log) {
 }
 
 wss.on('connection', (ws, req) => {
+    // Conexión ENTRANTE de otro nodo (malla s2s): no es un cliente, no lleva
+    // token ni cuenta para el rate limiter de usuarios. Se atiende aparte.
+    if (Mesh.isMeshPath(req.url)) {
+        mesh.handleInbound(ws);
+        return;
+    }
+
     // Obtener IP del cliente
     const clientIp = req.socket.remoteAddress || '0.0.0.0';
 
@@ -2177,6 +2219,7 @@ function start(port = Number(PORT)) {
                 if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
                 peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));
                 peerRegistry.startRefresh();
+                mesh.start();
             }
         }
 
@@ -2232,6 +2275,7 @@ function stop() {
         tokenCleanupInterval = null;
     }
     peerRegistry.stopRefresh();
+    mesh.stop();
 
     // Cerrar todas las conexiones de cliente
     for (const [, conn] of activeConnections) {
@@ -2300,19 +2344,35 @@ module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, set
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el
 // servicio quedaba a la espera del TimeoutStopSec (~30-90s) — los deploys del CD
 // (cc-deploy) reiniciaban lentísimo. Con SIGTERM atendido, el restart es inmediato.
+let shuttingDown = false;
 function gracefulShutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\n=========================================');
     console.log(`Recibida señal ${signal}`);
     console.log(`Cerrando ${activeConnections.size} conexiones activas...`);
+
+    // Avisar la baja a los peers ANTES de cerrar. Esto era imposible: la función
+    // cerraba los sockets y llamaba a process.exit(0) en la línea siguiente, de
+    // forma síncrona, así que nada asíncrono llegaba a salir. Como consecuencia,
+    // en CADA deploy los peers seguían ruteando hacia un proceso muerto hasta
+    // que se les caía el enlace por su cuenta.
+    try { mesh.sayGoodbye(); } catch (_) {}
 
     // Cerrar todas las conexiones activas
     for (const [token, conn] of activeConnections) {
         conn.ws.close();
     }
 
-    console.log('Servidor cerrado correctamente');
-    console.log('=========================================');
-    process.exit(0);
+    // Margen corto para que salgan los `bye` y los `close` por el cable. No es
+    // "esperar a que todo termine": es no matar el proceso en el mismo tick.
+    const grace = setTimeout(() => {
+        try { mesh.stop(); } catch (_) {}
+        console.log('Servidor cerrado correctamente');
+        console.log('=========================================');
+        process.exit(0);
+    }, Number(process.env.PROXY_SHUTDOWN_GRACE_MS || 250));
+    if (grace.unref) grace.unref();
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT (Ctrl+C)'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

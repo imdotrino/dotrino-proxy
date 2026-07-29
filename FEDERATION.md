@@ -40,8 +40,35 @@ la misma con la que está enrolado— y la usa para hablar con los demás:
   deploy simultáneo dejaba la federación andando **en un solo sentido** (A tenía
   pineado a B pero B no a A) durante 10 minutos, que es peor que no andar porque
   no se nota.
-- **`GET /peers`** — diagnóstico: mi prefijo, los peers configurados y los
-  pineados. Es lo primero que hay que mirar cuando "a veces no llegan".
+- **`GET /peers`** — diagnóstico: mi prefijo, los peers configurados, los
+  pineados y el estado de cada enlace de la malla. Es lo primero que hay que
+  mirar cuando "a veces no llegan".
+
+### Malla s2s (WebSocket persistente)
+El transporte entre nodos es un **WebSocket por peer**, no un POST por mensaje:
+
+- **Topología**: cada nodo DISCA a cada peer (`/_s2s`), así que entre dos nodos
+  hay dos sockets y cada uno manda por el suyo. Un socket de más a cambio de no
+  tener que resolver quién gana cuando los dos discan a la vez.
+- **NAT**: como el nodo disca hacia afuera, un proxio detrás de un router
+  doméstico ya puede federar. Con `POST /federate` era imposible: exigía ser
+  alcanzable desde fuera.
+- **Handshake**: el que recibe manda un reto; el que disca lo firma con la llave
+  del nodo y el receptor verifica contra la pubkey **pineada**. El reto fresco
+  por conexión cierra el replay sin firmar cada trama (una verificación ECDSA
+  por conexión, no por mensaje).
+- **Orden y acuse**: cada trama lleva `seq` y se guarda hasta su `ack`; al
+  reconectar se reenvía lo pendiente (hasta 500 tramas). El orden lo da TCP por
+  socket. El acuse es de RECEPCIÓN DEL NODO, no de entrega al usuario: si no,
+  el emisor reenviaría para siempre algo que ya llegó.
+- **Reconexión**: backoff de 0,5 s a 10 s con jitter ±25 %. El tope es bajo a
+  propósito: un peer caído casi siempre es un deploy y vuelve en segundos.
+- **Apagado limpio**: `gracefulShutdown` avisa `bye` a los peers antes de salir.
+  Antes era imposible — cerraba los sockets y llamaba a `process.exit(0)` en la
+  línea siguiente, de forma síncrona, así que en CADA deploy los peers seguían
+  ruteando hacia un proceso muerto hasta que se les caía el enlace solo.
+- `POST /federate` sigue existiendo (firmado) como reserva para un peer sin
+  enlace de malla.
 
 > **Se eliminó `PROXY_FEDERATION_TOKEN`.** Era un secreto simétrico compartido:
 > no distinguía QUÉ nodo hablaba, así que quien lo tuviera podía inyectar
