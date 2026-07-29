@@ -35,13 +35,19 @@ const path = require('path');
 const NS = 'proxy';
 
 /**
- * Variables que sólo se leen al construir el servidor: si el vault las entrega
- * DESPUÉS (que es siempre, porque no lo esperamos), quedan en `process.env` pero
- * no cambian nada hasta el próximo reinicio. Se avisa en vez de dejar creer que
- * ya están puestas — es la diferencia entre "rotaste" y "creíste que rotaste".
+ * Lo ÚNICO que el proxio sabe re-aplicar en caliente. Todo lo demás se lee al
+ * construir el servidor, así que si el vault lo entrega después —que es siempre,
+ * porque no lo esperamos— queda en `process.env` pero no cambia nada hasta el
+ * próximo reinicio, y hay que avisarlo: es la diferencia entre rotar y creer que
+ * rotaste.
+ *
+ * La lista dice qué SÍ se re-aplica, y no qué no, a propósito. Enumerar lo que
+ * llega tarde exige acordarse de ampliarla cada vez que aparece una variable
+ * nueva, y olvidarse falla en silencio (justo lo que pasó con PROXY_MAX_FANOUT).
+ * Así al revés, una variable nueva cae sola en «avisa que hace falta reiniciar»,
+ * que es el lado seguro del error.
  */
-const SOLO_AL_ARRANCAR = ['PORT', 'HOST', 'PROXY_DB_FILE', 'PROXY_PEERS', 'PROXY_PUBLIC_URL',
-    'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT', 'PROXY_MAX_FRAME_BYTES'];
+const SE_REAPLICAN = /^TURN_/;
 
 function serviceDir() {
     return process.env.VAULT_SERVICE_DIR || path.join(__dirname, 'vault-service');
@@ -80,7 +86,7 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, log = console.log } 
             // pero el operador quiere saber que quedó basura por limpiar.
             log(`[vault] pisaron el .env de esta máquina: ${overridden.join(', ')}`);
         }
-        const tarde = injected.filter((k) => SOLO_AL_ARRANCAR.includes(k));
+        const tarde = injected.filter((k) => !SE_REAPLICAN.test(k));
         if (tarde.length) {
             log(`[vault] ⚠ estas sólo se leen al arrancar, así que NO están activas todavía: ${tarde.join(', ')}`);
             log('[vault] ⚠ reinicia el proxy para que tomen efecto.');
@@ -90,4 +96,4 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, log = console.log } 
     return { enabled: true, stop: () => { stopped = true; } };
 }
 
-module.exports = { startVaultSecrets, isEnrolled, serviceDir, NS, SOLO_AL_ARRANCAR };
+module.exports = { startVaultSecrets, isEnrolled, serviceDir, NS, SE_REAPLICAN };
