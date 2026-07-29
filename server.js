@@ -1461,6 +1461,13 @@ wss.on('connection', (ws, req) => {
         instance: token,
         token: token,
         node: nodeIdentity ? nodeIdentity.nodeId : null,
+        // Los nodos que este proxio conoce. Se manda porque hay descubrimientos
+        // que son de TODO el ecosistema y no tienen dueño natural —la lista
+        // pública de salas, por ejemplo—: sin esto, cada proxio tendría su propia
+        // lista y quien está en uno no vería lo del otro. Con los ids, el cliente
+        // pregunta en cada nodo y mezcla, sin que haya un nodo árbitro.
+        // No filtra nada: los ids son públicos (van en cada instancia y en /peers).
+        peers: peerRegistry.known().map((p) => p.nodeId),
         timestamp: new Date().toISOString()
     }));
     

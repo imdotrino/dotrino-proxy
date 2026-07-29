@@ -146,3 +146,91 @@ describe('canales con nodo dueño', () => {
         await cb.close();
     }, 20000);
 });
+
+// El canal de DESCUBRIMIENTO (la lista pública de salas) no tiene dueño natural:
+// es un nombre global del ecosistema y no lo crea nadie en particular. En vez de
+// designar un nodo árbitro —que sería un punto único de fallo— cada proxio guarda
+// su lista y quien busca pregunta en todos y mezcla. Se publica en uno, se lee de
+// varios; el fan-out lo paga el CLIENTE, no el servidor.
+describe('descubrimiento: una lista por nodo, mezcladas por el cliente', () => {
+    let a, b, dirA, dirB;
+
+    beforeAll(async () => {
+        dirA = makeNodeDir('disc-a');
+        dirB = makeNodeDir('disc-b');
+        const portA = await freePort();
+        const portB = await freePort();
+        [a, b] = await Promise.all([
+            startNode({ name: 'A', dir: dirA, port: portA, peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, peers: [`http://127.0.0.1:${portA}`] })
+        ]);
+        const deadline = Date.now() + 30000;
+        for (;;) {
+            const s = await Promise.all([a, b].map((n) => fetch(`${n.http}/peers`).then(r => r.json()).catch(() => null)));
+            if (s.every((x) => x && x.peers?.length && Object.values(x.mesh || {}).some((m) => m.ready))) break;
+            if (Date.now() > deadline) throw new Error('la malla no se estableció');
+            await sleep(300);
+        }
+    }, 60000);
+
+    afterAll(async () => {
+        await Promise.all([a?.stop(), b?.stop()]);
+        for (const d of [dirA, dirB]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {} }
+    });
+
+    it('el `connected` trae el id del proxio y los que conoce', async () => {
+        const ca = await connectTo(a.url);
+        const frame = ca.recv.find((m) => m.type === 'connected') ||
+            { node: ca.node, peers: ca.peers };
+        // El helper guarda el frame; se comprueba contra /peers, que es la verdad.
+        const info = await fetch(`${a.http}/peers`).then((r) => r.json());
+        expect(info.self.nodeId).toBe(a.nodeId);
+        expect(info.peers.map((p) => p.nodeId)).toContain(b.nodeId);
+        await ca.close();
+    }, 20000);
+
+    it('un host de cada proxio, y el cliente los ve a los dos al mezclar', async () => {
+        const sign = makeChannelSigner();
+        const canalA = `${a.nodeId}/cclobby/chess`;
+        const canalB = `${b.nodeId}/cclobby/chess`;
+
+        // Cada host anuncia SOLO en el canal de su propio proxio.
+        const hostA = await connectTo(a.url);
+        hostA.send({ type: 'publish', channel: sign(canalA) });
+        await hostA.waitFor((m) => m.type === 'published');
+
+        const hostB = await connectTo(b.url);
+        hostB.send({ type: 'publish', channel: sign(canalB) });
+        await hostB.waitFor((m) => m.type === 'published');
+
+        // Quien busca (conectado a B) pregunta en los DOS y mezcla.
+        const buscador = await connectTo(b.url);
+        buscador.send({ type: 'list', channel: sign(canalA), id: 'la' });
+        buscador.send({ type: 'list', channel: sign(canalB), id: 'lb' });
+        const la = await buscador.waitFor((m) => m.type === 'channel_list' && m.id === 'la', 10000);
+        const lb = await buscador.waitFor((m) => m.type === 'channel_list' && m.id === 'lb', 10000);
+        const mezcla = [...new Set([...la.tokens, ...lb.tokens])];
+
+        expect(mezcla).toContain(hostA.token);
+        expect(mezcla).toContain(hostB.token);
+        await hostA.close(); await hostB.close(); await buscador.close();
+    }, 30000);
+
+    it('si un nodo no contesta, se siguen viendo las salas de los demás', async () => {
+        const sign = makeChannelSigner();
+        const canalB = `${b.nodeId}/cclobby/chess`;
+        const hostB = await connectTo(b.url);
+        hostB.send({ type: 'publish', channel: sign(canalB) });
+        await hostB.waitFor((m) => m.type === 'published');
+
+        const buscador = await connectTo(b.url);
+        // Un nodo que no existe: su consulta falla, pero no arrastra a la otra.
+        buscador.send({ type: 'list', channel: sign('YYYYYYYYYYYY/cclobby/chess'), id: 'muerto' });
+        buscador.send({ type: 'list', channel: sign(canalB), id: 'vivo' });
+        const muerto = await buscador.waitFor((m) => (m.type === 'error' || m.type === 'channel_list') && m.id === 'muerto', 10000);
+        const vivo = await buscador.waitFor((m) => m.type === 'channel_list' && m.id === 'vivo', 10000);
+        expect(muerto.type).toBe('error');
+        expect(vivo.tokens).toContain(hostB.token);
+        await hostB.close(); await buscador.close();
+    }, 30000);
+});
