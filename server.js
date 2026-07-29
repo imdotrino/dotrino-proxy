@@ -1387,24 +1387,30 @@ let rateLimiter = createRateLimiter();
 let turnIssuer = createTurnIssuer();
 let vaultSecretsHandle = null;
 
-// El proxy es transporte puro (sin secretos en su core): arranca SIEMPRE, y la
-// única feature con secretos (TURN) espera al vault. Reintenta para siempre.
+// El proxy es transporte puro (sin secretos en su core): arranca SIEMPRE con lo
+// que tenga en el `.env`, y la configuración del vault se aplica cuando llega.
+// No se la espera: el vault habla con sus servicios POR EL PROXY, así que un
+// proxy bloqueado esperándolo esperaría a alguien que lo necesita escuchando.
 function startVaultSecretsLoop(log = console.log) {
     const { startVaultSecrets } = require('./vaultSecrets');
     vaultSecretsHandle = startVaultSecrets({
         log,
-        onSecrets: (s) => {
-            if (s.TURN_KEY_ID && s.TURN_KEY_API_TOKEN) {
-                if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
-                turnIssuer = createTurnIssuer({ keyId: s.TURN_KEY_ID, apiToken: s.TURN_KEY_API_TOKEN });
-                log('[turn] llaves de Cloudflare cargadas desde el vault: TURN habilitado');
-            } else {
-                log('[vault] secretos recibidos sin TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN sigue apagado');
-            }
+        // Para cuando corre esto, `vaultSecrets` ya volcó el bundle en
+        // `process.env` pisando el `.env`. Acá sólo se re-aplica en caliente lo
+        // que se puede re-aplicar.
+        onSecrets: () => {
+            // SIN opts a propósito: `createTurnIssuer` lee TODO de `process.env`,
+            // así que reconstruirlo así toma del vault no sólo las dos llaves
+            // sino también los topes (TTL, cuotas, timeout). Pasarle {keyId,
+            // apiToken} como antes dejaba los topes clavados en el `.env` viejo.
+            if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
+            turnIssuer = createTurnIssuer();
+            if (turnIssuer.enabled) log('[turn] llaves de Cloudflare desde el vault: TURN habilitado');
+            else log('[vault] configuración recibida sin TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN sigue apagado');
         }
     });
     if (vaultSecretsHandle.enabled) {
-        log('[vault] proxy enrolado: esperando los secretos del vault (el transporte ya corre)');
+        log('[vault] proxy enrolado: esperando la configuración del vault (el transporte ya corre)');
     }
 }
 

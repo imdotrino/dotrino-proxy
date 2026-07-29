@@ -23,6 +23,20 @@ async function main() {
     const dir = serviceDir();
     await enrollService({
         qr: arg, ns: NS, dir,
+        // Un agente tiene UNA identidad y se la cede el vault: enrolar de nuevo
+        // REEMPLAZA la que hubiera. En el proxy eso tiene un precio que hay que
+        // decir antes, no después: esta misma llave es su identidad de red, y su
+        // id de nodo SALE de ella (nodeIdentity.js). Cambiarla significa que el
+        // nodo pasa a llamarse distinto: las instancias y citas vivas mueren, y
+        // los peers que lo tenían pineado lo rechazan hasta re-pinearlo a mano
+        // (que es a propósito: así es como se echa a un nodo comprometido).
+        onReplace: (prev) => {
+            console.log(`\n⚠ Este proxio YA estaba enrolado (dispositivo ${prev.deviceId}, del ${new Date(prev.enrolledAt).toISOString().slice(0, 10)}).`);
+            console.log('  Se descarta esa identidad y con ella el ID DE NODO actual:');
+            console.log('  · las instancias y citas emitidas dejan de resolver;');
+            console.log('  · los peers federados lo rechazan hasta que los re-pineen.');
+            console.log('  Si sólo querías recargar los secretos, NO enroles: reinicia el proxio.\n');
+        },
         onCode: ({ deviceId, code }) => {
             console.log(`\nDispositivo del proxy: ${deviceId}`);
             console.log(`Aprueba en el vault:   dotrino-vault approve ${code}\n`);

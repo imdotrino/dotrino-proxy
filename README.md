@@ -49,30 +49,51 @@ cp .env.example .env   # luego completá las claves VAPID
 
 > **Requiere Node ≥ 22.5** por el módulo nativo `node:sqlite`.
 
-### Secretos desde el vault (camino oficial)
+### Configuración desde el vault (camino oficial)
 
-El proxy es **transporte puro**: su core no usa secretos de terceros y arranca
-siempre. Lo que sí los usa (TURN) los obtiene del **vault del ecosistema**
-(`dotrino-vault`) como un **cliente identificado** más — la llave de Cloudflare
-no vive en el `.env` del VPS. La respuesta viaja **sellada** (el propio proxy
-que la transporta no puede leerla) y **firmada** por la maestra del vault.
-Si el vault no está disponible, TURN queda `enabled:false` y el proxy reintenta
-para siempre (regla del ecosistema: la feature espera al vault).
+El proxio es **un agente de Dotrino como cualquier otro**: puede correr suelto con
+su `.env` o enrolado a un vault. Enrolado, **el vault manda**: lo que entrega se
+vuelca en el entorno del proceso **pisando** lo que dijera el `.env`. No lo
+reemplaza —el `.env` sigue arrancando la máquina— pero deja de tener la última
+palabra. Eso es lo que hace barata la **rotación**: se cambia el valor en un solo
+lugar y ningún `.env` viejo olvidado en un VPS puede seguir ganando. Al arrancar,
+el log dice qué claves tuvo que pisar; si aparece alguna, ese `.env` tiene basura
+por limpiar.
+
+La respuesta del vault viaja **sellada** (el propio proxio que la transporta no
+puede leerla) y **firmada** por la maestra, verificada contra la `iss` pineada en
+el enrolamiento.
+
+**Lo que NO hace: esperar al vault.** El proxio no puede bloquear su arranque
+pidiendo configuración, porque el vault habla con sus servicios **por el proxio**:
+esperarlo sería esperar a alguien que necesita que el proxio ya esté escuchando.
+Así que el transporte levanta siempre con lo que haya y la configuración del vault
+se aplica cuando llega. Consecuencia honesta: lo que sólo se lee al arrancar
+(`PORT`, `HOST`, `PROXY_PEERS`, VAPID…) queda en el entorno pero **no toma efecto
+hasta el próximo reinicio**, y el log lo avisa en vez de dejarte creer que ya está.
+Lo que sí se re-aplica en caliente es TURN, con sus topes incluidos.
+
+**Identidad.** Un agente tiene **una** identidad y se la cede el vault: no adopta
+cuentas y re-enrolar **reemplaza** la anterior. En el proxio esa llave es además su
+identidad de red —el id de nodo se deriva de ella—, así que re-enrolar le cambia el
+nombre en la red: mueren las instancias y citas vivas y los peers federados lo
+rechazan hasta re-pinearlo. Si sólo quieres recargar la configuración, **no
+enroles: reinicia**.
 
 Enrolamiento (una vez):
 
 ```bash
 # En el PC del vault:
-dotrino-vault pair --service proxy          # imprime QR + payload JSON
+dotrino-vault pair --service proxy          # imprime la invitación (URL + código)
 dotrino-vault secret set proxy TURN_KEY_ID <id>
 dotrino-vault secret set proxy TURN_KEY_API_TOKEN <token>
 
-# En el host del proxy:
-node enroll-vault.js '<payload JSON del QR>'   # imprime un código
+# En el host del proxy (pega la invitación tal cual, en cualquiera de sus formas):
+node enroll-vault.js '<invitación>'            # imprime un código
 # En el PC del vault:
 dotrino-vault approve <código>
 
-# Reiniciar el proxy: al arrancar detecta ./vault-service/ y pide sus secretos.
+# Reiniciar el proxy: al arrancar detecta ./vault-service/ y pide su configuración.
 ```
 
 ## Uso
