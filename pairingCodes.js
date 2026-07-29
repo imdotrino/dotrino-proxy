@@ -3,7 +3,7 @@
  *
  * Hasta la fase 4 ese código era el MISMO identificador con el que se ruteaba un
  * mensaje. De ahí salían los dos problemas del ecosistema con varios proxios:
- * como dirección global, 4 caracteres no alcanzan (35^4 = 1.500.625, sorteados
+ * como dirección global, 4 caracteres no alcanzan (unas 700.000 combinaciones, sorteadas
  * por cada nodo sin hablar con los demás → el mismo código podía estar vivo en
  * dos nodos y un mensaje podía terminar en la persona equivocada); y como código
  * humano no podía alargarse sin volverse incómodo de dictar.
@@ -163,4 +163,6 @@ class PairingCodes {
     stats() { return { active: this.codes.size }; }
 }
 
-module.exports = { PairingCodes, normalizeCode, ALLOWED_CHARS, CODE_BODY_LEN, DEFAULT_TTL_MS, MAX_TTL_MS };
+// El alfabeto NO se re-exporta desde acá: vive en alphabet.js y un segundo
+// nombre público invita a que alguien importe el alias y deje de ver el original.
+module.exports = { PairingCodes, normalizeCode, CODE_BODY_LEN, DEFAULT_TTL_MS, MAX_TTL_MS };

@@ -10,8 +10,10 @@ describe('alfabeto sin confundibles', () => {
     // no mapear nada: quien lee una `S` de verdad en la pantalla y la teclea
     // obtendría un `5`, y su código correcto pasaría a ser inválido.
     it('ningún carácter mapeado se emite jamás', () => {
+        // Sin excepciones: la invariante se comprueba tal como está escrita. Al
+        // principio había un `O→O` identidad que obligaba a saltárselo, y una
+        // invariante con excepción deja de ser una barandilla.
         for (const origen of Object.keys(CONFUSABLES)) {
-            if (CONFUSABLES[origen] === origen) continue;   // O→O es identidad
             expect(ALPHABET.includes(origen)).toBe(false);
         }
     });
@@ -94,6 +96,13 @@ describe('alfabeto sin confundibles', () => {
 });
 
 describe('palabras desafortunadas', () => {
+    it('solo lista lo que el alfabeto PUEDE producir', () => {
+        const { FEOS, ALPHABET: A } = require('../alphabet');
+        for (const w of FEOS) {
+            for (const c of w) expect(A.includes(c)).toBe(true);
+        }
+    });
+
     it('las detecta', () => {
         expect(isUnfortunate('PUTA')).toBe(true);
         expect(isUnfortunate('xxCACAxx')).toBe(true);

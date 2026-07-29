@@ -54,7 +54,7 @@ const CONFUSABLES = {
     Z: '2',
     B: '8',
     G: '6',
-    O: 'O', 0: 'O'    // el 0 no se emite nunca; si alguien lo teclea, quiso decir O
+    0: 'O'            // el 0 no se emite nunca; si alguien lo teclea, quiso decir O
 };
 
 /**
@@ -79,12 +79,16 @@ function isEmittable(s) {
     return typeof s === 'string' && s.length > 0 && [...s].every((c) => ALPHABET.includes(c));
 }
 
-// Palabras de 4 letras que pueden salir del sorteo y que nadie quiere mostrarle a
-// otra persona. No es censura ni pretende ser exhaustivo: es que el cuerpo de la
-// cita son 4 caracteres visibles y sale gratis volver a sortear. Sacar una letra
-// del alfabeto (Crockford saca la U por esto) no alcanza — sin U siguen saliendo
+// Palabras que pueden salir del sorteo y que nadie quiere mostrarle a otra
+// persona. No es censura ni pretende ser exhaustivo: es que el código son 6
+// caracteres visibles y volver a sortear sale gratis. Sacar una letra del
+// alfabeto (Crockford saca la U por esto) no alcanza — sin U siguen saliendo
 // PENE, TETA, CACA — y cuesta entropía.
-const FEOS = ['PUTA', 'PUTO', 'TETA', 'PENE', 'CACA', 'PEDO', 'MOCO', 'MEAR', 'CULO', 'ANAL', 'KKK'];
+//
+// Solo se listan las que el alfabeto PUEDE producir: las que llevan L o S ya son
+// imposibles por construcción (CULO, ANAL, CULIAO…), así que ponerlas sería
+// dar la impresión de que el filtro hace más de lo que hace.
+const FEOS = ['PUTA', 'PUTO', 'TETA', 'PENE', 'CACA', 'PEDO', 'MOCO', 'MEAR', 'KKK'];
 
 /** ¿El código sorteado contiene algo que da vergüenza dictar? */
 function isUnfortunate(code) {

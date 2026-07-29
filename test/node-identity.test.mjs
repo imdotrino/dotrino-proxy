@@ -4,8 +4,9 @@ const require = createRequire(import.meta.url);
 const crypto = require('crypto');
 const {
     deriveNodeId, isValidNodeId, nodeIdMatches, hintOf, canonicalPubkeyBytes,
-    signBody, verifyBody, ReplayWindow, newNonce, NODE_ID_LEN, CODE_HINT_LEN, ALLOWED_CHARS
+    signBody, verifyBody, ReplayWindow, newNonce, NODE_ID_LEN, CODE_HINT_LEN
 } = require('../nodeIdentity');
+const { ALPHABET } = require('../alphabet');
 const { PeerRegistry } = require('../peers');
 
 /** Identidad de nodo con la misma forma que la del vault (device.publickey/privateJwk). */
@@ -39,7 +40,7 @@ describe('id de nodo derivado', () => {
         const id = makeNodeIdentity().nodeId;
         expect(isValidNodeId(id)).toBe(true);
         expect(id).toHaveLength(NODE_ID_LEN);
-        for (const c of id) expect(ALLOWED_CHARS).toContain(c);
+        for (const c of id) expect(ALPHABET).toContain(c);
     });
 
     it('es determinista: la misma llave da siempre el mismo id', () => {

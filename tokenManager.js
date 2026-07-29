@@ -5,21 +5,24 @@
 // humano leía o tecleaba para emparejarse. Esa doble función es la que rompía el
 // ecosistema al haber varios proxios:
 //
-//   - como dirección, 4 caracteres no alcanzan para un espacio GLOBAL (35^4 =
-//     1.500.625, y cada nodo sorteaba sin hablar con los demás → el mismo código
-//     podía estar vivo en dos nodos a la vez, y un mensaje ruteado globalmente se
-//     podía entregar a la persona equivocada);
+//   - como dirección, 4 caracteres no alcanzan para un espacio GLOBAL (unas
+//     700.000 combinaciones, y cada nodo sorteaba sin hablar con los demás → el
+//     mismo código podía estar vivo en dos nodos a la vez, y un mensaje ruteado
+//     globalmente se podía entregar a la persona equivocada);
 //   - como código humano, no podía crecer sin volverse incómodo de dictar.
 //
 // Ahora son dos cosas distintas. Acá vive la primera: la INSTANCIA, que nunca la
 // ve una persona, así que puede ser todo lo larga que haga falta. Lleva delante
-// el PREFIJO DEL NODO que la emitió, con lo cual:
+// el ID DEL NODO que la emitió, con lo cual:
 //   - es única en todo el ecosistema POR CONSTRUCCIÓN (no por probabilidad);
-//   - se rutea leyéndola: el prefijo dice a qué nodo hay que mandarle el mensaje,
-//     sin preguntarle a nadie ni mantener un registro global.
+//   - se rutea leyéndola: el id dice a qué nodo hay que mandarle el mensaje, sin
+//     preguntarle a nadie ni mantener un registro global.
+//
+// Este módulo ya NO depende del alfabeto: las instancias son bytes al azar en
+// base64url y el id de nodo lo calcula nodeIdentity. Tenía una copia de
+// ALLOWED_CHARS y un generador de códigos de 4 caracteres que quedó sin usar.
 // El código corto para humanos (la "cita") vive aparte, en pairingCodes.js.
 const crypto = require('crypto');
-const { ALPHABET: ALLOWED_CHARS } = require('./alphabet');
 
 // 16 bytes = 128 bits en base64url (22 caracteres). Adivinar una instancia ajena
 // no es un objetivo realista, que es justo lo que no podía decirse de 4 chars.
@@ -29,8 +32,6 @@ class TokenManager {
     constructor() {
         // Mapa de instancias activas: instance -> {ws, ip, lastActivity}
         this.activeTokens = new Map();
-        // Longitud de los tokens cortos (histórico; ver generateRandomToken)
-        this.tokenLength = 4;
         // Id del nodo (12 caracteres, derivado de su llave). Lo fija server.js al
         // arrancar. Sin él las instancias no son ruteables entre nodos.
         this.nodeId = null;
@@ -57,19 +58,6 @@ class TokenManager {
         return id + crypto.randomBytes(INSTANCE_BYTES).toString('base64url');
     }
 
-    // Generar un token corto aleatorio de la longitud especificada.
-    // Usa el CSPRNG del sistema (`crypto.randomInt`), NO `Math.random()`: el token
-    // es un identificador que otros pueden intentar adivinar para escribirle a una
-    // conexión ajena, y `Math.random()` es predecible a partir de unas pocas
-    // muestras. `randomInt` además reparte uniforme sobre los 35 símbolos (rechaza
-    // el sesgo del módulo), cosa que el `Math.floor(rand*35)` tampoco garantizaba.
-    generateRandomToken(length) {
-        let token = '';
-        for (let i = 0; i < length; i++) {
-            token += ALLOWED_CHARS[crypto.randomInt(ALLOWED_CHARS.length)];
-        }
-        return token;
-    }
 
     // Verificar si un token corto ya está en uso
     isTokenInUse(token) {
@@ -144,14 +132,6 @@ class TokenManager {
     // Obtener todos los tokens cortos activos
     getAllActiveTokens() {
         return Array.from(this.activeTokens.keys());
-    }
-
-    // Obtener estadísticas
-    getStats() {
-        return {
-            activeTokens: this.activeTokens.size,
-            tokenLength: this.tokenLength
-        };
     }
 
     // Limpiar tokens inactivos (por si acaso hay fugas)

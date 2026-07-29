@@ -205,7 +205,9 @@ class ReplayWindow {
 const newNonce = () => crypto.randomBytes(12).toString('base64url');
 
 module.exports = {
-    ALLOWED_CHARS,
+    // El alfabeto no se re-exporta: se importa de alphabet.js, que es su único
+    // dueño. Tener dos nombres públicos dejaba la migración a "un solo sitio" a
+    // medias y es cómo vuelven a aparecer las copias.
     NODE_ID_LEN,
     CODE_HINT_LEN,
     canonicalStringify,
