@@ -29,19 +29,19 @@
  * rechaza el canje y se pide otro código: nunca se elige "el primero".
  */
 const crypto = require('crypto');
+const { ALPHABET: ALLOWED_CHARS, normalize, isUnfortunate } = require('./alphabet');
 
-const ALLOWED_CHARS = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const CODE_BODY_LEN = 4;                       // + 2 de prefijo de nodo = 6
+const CODE_BODY_LEN = 4;                       // + 2 de filtro de nodo = 6
 const DEFAULT_TTL_MS = 5 * 60 * 1000;          // 5 minutos
 const MAX_TTL_MS = 30 * 60 * 1000;
 const MAX_CODES = 10000;
 
-/** Normaliza lo que teclea una persona: mayúsculas, sin espacios ni guiones. */
-function normalizeCode(raw) {
-    if (typeof raw !== 'string') return null;
-    const clean = raw.toUpperCase().replace(/[\s-]/g, '');
-    return clean.length ? clean : null;
-}
+/**
+ * Normaliza lo que teclea (o le dictan a) una persona. Además de mayúsculas y de
+ * quitar separadores, traduce los caracteres confundibles: quien oye "ese" y
+ * teclea `S` obtiene el `5` que de verdad se emitió. Ver alphabet.js.
+ */
+const normalizeCode = normalize;
 
 class PairingCodes {
     constructor({ ttlMs = DEFAULT_TTL_MS } = {}) {
@@ -55,6 +55,20 @@ class PairingCodes {
         let out = '';
         for (let i = 0; i < CODE_BODY_LEN; i++) out += ALLOWED_CHARS[crypto.randomInt(ALLOWED_CHARS.length)];
         return out;
+    }
+
+    /**
+     * Cuerpo sorteado que no forme una palabra que dé vergüenza dictar.
+     * Se comprueba el código COMPLETO (filtro + cuerpo), no solo el cuerpo: con
+     * el filtro `PU` y el cuerpo `TAXX` sale `PUTAXX`, y mirando solo el cuerpo
+     * eso pasaba limpio.
+     */
+    _decentBody(hint) {
+        for (let i = 0; i < 20; i++) {
+            const body = this._randomBody();
+            if (!isUnfortunate(hint + body)) return body;
+        }
+        return this._randomBody();
     }
 
     /**
@@ -74,7 +88,7 @@ class PairingCodes {
         const expiresAt = Date.now() + ttl;
         let code = null;
         for (let i = 0; i < 50; i++) {
-            const candidate = hint + this._randomBody();
+            const candidate = hint + this._decentBody(hint);
             if (!this.codes.has(candidate)) { code = candidate; break; }
         }
         if (!code) return null;

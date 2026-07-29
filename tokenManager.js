@@ -19,8 +19,7 @@
 //     sin preguntarle a nadie ni mantener un registro global.
 // El código corto para humanos (la "cita") vive aparte, en pairingCodes.js.
 const crypto = require('crypto');
-
-const ALLOWED_CHARS = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const { ALPHABET: ALLOWED_CHARS } = require('./alphabet');
 
 // 16 bytes = 128 bits en base64url (22 caracteres). Adivinar una instancia ajena
 // no es un objetivo realista, que es justo lo que no podía decirse de 4 chars.

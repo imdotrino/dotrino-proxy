@@ -13,24 +13,25 @@
  * una llave nueva: la identidad de red del nodo es la misma con la que el vault
  * lo conoce.
  *
- * PREFIJO DE NODO: dos caracteres del alfabeto de tokens que identifican al nodo
- * dentro del ecosistema. Se usa para cualificar los códigos de emparejamiento
- * (fase 4) y los canales (fase 5), de modo que un código diga a qué nodo hay que
- * preguntarle en vez de tener que pregonarlo a toda la malla. Por defecto se
- * DERIVA de la pubkey del nodo (verificable por cualquiera, sin registro), y se
- * puede fijar a mano con PROXY_NODE_PREFIX cuando el directorio asigna uno.
+ * ID DE NODO: 12 caracteres DERIVADOS de la llave del nodo, no declarados. Como
+ * cualquiera puede recalcularlos de la pubkey y se verifican al recibirlos, usar
+ * el id de otro exige su llave privada — y por eso NADIE tiene que admitir a un
+ * nodo nuevo en la red. Lo único que se acepta o no es una arista, y eso lo
+ * decide cada operador. El id va delante de la instancia (para rutearla
+ * leyéndola) y sus 2 primeros caracteres viajan en la cita como filtro.
  */
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// Mismo alfabeto que los códigos: sin 0 ni minúsculas.
-const ALLOWED_CHARS = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+// El alfabeto vive en alphabet.js: es el mismo para el id de nodo y para la
+// cita, y tenerlo duplicado era pedir que se desincronizaran.
+const { ALPHABET: ALLOWED_CHARS } = require('./alphabet');
 
 // El id de nodo va DENTRO de la instancia, que nadie lee nunca, así que acá
-// alargar es gratis. 12 caracteres son 35^12 ≈ 3,4·10^18: moler una llave para
-// caer en el id de otro es inviable, y por eso NADIE TIENE QUE ADMITIR NADA —
-// reclamar el id ajeno exige su llave privada, no el permiso de la red.
+// alargar es gratis. 12 caracteres del alfabeto de 29 son ≈ 3,5·10^17: moler una
+// llave para caer en el id de otro cuesta del orden de 170.000 años, y por eso
+// NADIE TIENE QUE ADMITIR NADA — reclamar el id ajeno exige su llave privada.
 const NODE_ID_LEN = 12;
 
 // Los 2 primeros caracteres del id viajan en el código corto como FILTRO, no
@@ -70,11 +71,12 @@ function canonicalPubkeyBytes(pubkeyJson) {
 }
 
 /**
- * Id de nodo derivado: base-35 de sha256(punto comprimido), NODE_ID_LEN chars.
+ * Id de nodo derivado: sha256(punto comprimido) convertido a la base del
+ * alfabeto, NODE_ID_LEN caracteres.
  *
- * Se hace por conversión de base sobre un entero, no byte a byte con `% 35`:
- * 256 no es múltiplo de 35, así que el reparto por byte sesga los primeros 11
- * símbolos un ~14 % — irrelevante para colisiones, pero deja de ser cierto que
+ * Se hace por conversión de base sobre un entero, no byte a byte con `% N`: 256
+ * no es múltiplo del tamaño del alfabeto, así que el reparto por byte sesga los
+ * primeros símbolos — irrelevante para colisiones, pero deja de ser cierto que
  * el id es uniforme, y sobre esa uniformidad se apoya el cálculo de molido.
  */
 function deriveNodeId(pubkey) {

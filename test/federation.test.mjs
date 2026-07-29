@@ -176,7 +176,7 @@ describe('federación entre dos nodos', () => {
 
         it('escribirle a una instancia de un nodo desconocido falla', async () => {
             const cb = await connectTo(b.url);
-            const deNadie = 'ZZZZZZZZZZZZinstanciaDeNadie12345';
+            const deNadie = 'YYYYYYYYYYYYinstanciaDeNadie12345';
             cb.send({ to: [deNadie], message: 'al vacío', id: 'nope-1' });
             const res = await cb.waitFor((m) => m.type === 'message_sent');
             expect(res.failed).toContain(deNadie);

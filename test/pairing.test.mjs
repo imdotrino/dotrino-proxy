@@ -138,7 +138,7 @@ describe('citas entre nodos', () => {
         const cb = await connectTo(b.url);
         // Un filtro que no coincide con NINGÚN nodo conocido: ni siquiera hay a
         // quién preguntarle, así que se rechaza sin pregonarlo a la malla.
-        const ajeno = ['ZZ', 'YY', 'XX'].find((h) => h !== a.hint && h !== b.hint);
+        const ajeno = ['YY', 'XX', 'WW'].find((h) => h !== a.hint && h !== b.hint);
         cb.send({ type: 'pair-redeem', code: ajeno + '1234', id: 'unk' });
         const res = await cb.waitFor((m) => m.type === 'pair-redeem', 10000);
         expect(res.ok).toBe(false);

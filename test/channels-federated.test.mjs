@@ -138,7 +138,8 @@ describe('canales con nodo dueño', () => {
     it('un canal de un nodo desconocido responde error, no una lista vacía', async () => {
         const sign = makeChannelSigner();
         const cb = await connectTo(b.url);
-        cb.send({ type: 'list', channel: sign('ZZZZZZZZZZZZ/sala-fantasma'), id: 'zz' });
+        // Id BIEN FORMADO (alfabeto válido) pero que no es de ningún nodo conocido.
+        cb.send({ type: 'list', channel: sign('YYYYYYYYYYYY/sala-fantasma'), id: 'zz' });
         const res = await cb.waitFor((m) => m.type === 'error' || m.type === 'channel_list', 10000);
         expect(res.type).toBe('error');
         expect(res.error).toMatch(/nodo desconocido/i);

@@ -58,6 +58,34 @@ no corresponde a ningún nodo conocido, se responde `failed`.
 ← { "type": "pair-redeem", "ok": true, "instance": "K7…", "publickey": "<JWK>" }
 ```
 
+### El alfabeto: sin caracteres confundibles
+
+Los identificadores usan **29 símbolos**: `123456789ACDEFHJKMNOPQRTUVWXY`.
+
+Se quitaron de la EMISIÓN las letras que se confunden con un dígito —`I L S Z B
+G`, además del `0` que ya no estaba— y a la ENTRADA se traducen:
+
+| se teclea | se entiende |
+|---|---|
+| `I` `L` | `1` |
+| `S` | `5` |
+| `Z` | `2` |
+| `B` | `8` |
+| `G` | `6` |
+| `0` | `O` |
+
+La regla que ordena esto: **solo se puede traducir un carácter que nunca se
+emite**. Traducir `S→5` mientras se sigue emitiendo `S` sería peor que no hacer
+nada — quien lee una `S` de verdad en la pantalla y la teclea vería fallar su
+código correcto.
+
+De paso, al salir la `B` desaparece el **B/V**, que es la confusión hablada más
+fuerte del español. M/N y U/V se conservan: se confunden al dictar, pero sacarlos
+cuesta entropía y ese fallo es recuperable (sale "código no válido").
+
+El sorteo además **descarta cuerpos que formen una palabra malsonante**: son 4
+caracteres visibles y volver a sortear sale gratis.
+
 El código se acepta en minúsculas y con espacios o guiones.
 
 Los 2 primeros caracteres son un **filtro** —los dos primeros del id del proxio

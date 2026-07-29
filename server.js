@@ -2433,8 +2433,11 @@ wss.on('connection', (ws, req) => {
     function handlePairRedeemMessage(ws, message) {
         const raw = message.code;
         const code = require('./pairingCodes').normalizeCode(raw);
-        if (!code) {
-            const e = { type: 'pair-redeem', ok: false, error: 'código vacío' };
+        // Se valida la FORMA antes de mover nada por la malla: un código con
+        // símbolos que este ecosistema no emite no puede existir en ningún nodo,
+        // así que preguntarlo sería tráfico s2s regalado a quien mande basura.
+        if (!code || code.length !== nodeIdentityLib.CODE_HINT_LEN + 4 || !require('./alphabet').isEmittable(code)) {
+            const e = { type: 'pair-redeem', ok: false, error: 'código no válido' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const hint = code.slice(0, nodeIdentityLib.CODE_HINT_LEN);
