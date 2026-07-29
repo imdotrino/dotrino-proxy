@@ -144,3 +144,57 @@ describe('malla s2s por WebSocket', () => {
         expect(closeCode).toBe(1008);
     }, 20000);
 });
+
+// El rate limiter del proxy se cobra en UN solo sitio: el bucle de mensajes de
+// los clientes. Todo lo que entra por s2s lo esquivaba, así que un peer podía
+// canjear citas a velocidad de cable y saltarse cualquier límite del lado del
+// cliente. Como la cita es el código corto que una persona comparte, eso
+// convertía a un solo peer en una cosechadora.
+describe('límite por peer en la malla', () => {
+    let a, b, dirA, dirB;
+
+    beforeAll(async () => {
+        dirA = makeNodeDir('lim-a');
+        dirB = makeNodeDir('lim-b');
+        const portA = await freePort();
+        const portB = await freePort();
+        [a, b] = await Promise.all([
+            startNode({ name: 'A', dir: dirA, port: portA, prefix: 'K7', peers: [`http://127.0.0.1:${portB}`] }),
+            startNode({ name: 'B', dir: dirB, port: portB, prefix: 'M2', peers: [`http://127.0.0.1:${portA}`] })
+        ]);
+        await waitMeshReady([a, b]);
+    }, 60000);
+
+    afterAll(async () => {
+        await Promise.all([a?.stop(), b?.stop()]);
+        for (const d of [dirA, dirB]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {} }
+    });
+
+    it('corta un barrido de canjes por s2s', async () => {
+        const cb = await connectTo(b.url);
+        // 60 canjes seguidos contra códigos inventados del nodo A. El burst de
+        // pair-redeem es 20: el resto tiene que quedarse sin respuesta del dueño
+        // (se descarta en el borde) y caer en el timeout del canje.
+        const respuestas = [];
+        for (let i = 0; i < 60; i++) {
+            cb.send({ type: 'pair-redeem', code: 'K7' + String(i).padStart(4, '0'), id: `sweep-${i}` });
+        }
+        await sleep(2500);
+        for (const m of cb.recv) if (m.type === 'pair-redeem') respuestas.push(m);
+        // Con el límite puesto, NO pueden contestarse las 60.
+        expect(respuestas.length).toBeLessThan(60);
+        // Y ninguna puede decir que acertó: los códigos son inventados.
+        expect(respuestas.every((r) => r.ok === false)).toBe(true);
+        await cb.close();
+    }, 30000);
+
+    it('el tráfico normal no se ve afectado por el límite', async () => {
+        const alice = makeUser();
+        const ca = await connectIdentified(a.url, alice);
+        const cb = await connectTo(b.url);
+        for (let i = 0; i < 30; i++) cb.send({ to_publickey: alice.publickey, message: `normal-${i}` });
+        const ultimo = await ca.waitFor((m) => m.type === 'message' && m.message === 'normal-29', 10000);
+        expect(ultimo.message).toBe('normal-29');
+        await ca.close(); await cb.close();
+    }, 30000);
+});

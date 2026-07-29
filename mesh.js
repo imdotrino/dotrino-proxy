@@ -29,6 +29,66 @@ const { signBody, verifyBody, newNonce } = require('./nodeIdentity');
 
 const S2S_PATH = '/_s2s';
 const HELLO_TIMEOUT_MS = 10000;
+
+/**
+ * Límite por PEER de las operaciones que llegan por la malla.
+ *
+ * El rate limiter del proxy se cobra en un único sitio: el bucle de mensajes de
+ * los clientes WebSocket. Todo lo que entra por s2s lo esquivaba por completo,
+ * así que un nodo peer podía canjear citas a velocidad de cable y saltarse
+ * cualquier límite puesto del lado del cliente. Como la cita es el código corto
+ * que una persona comparte, eso convertía a un solo peer en una cosechadora.
+ *
+ * Los peers están pineados, así que esto no defiende de desconocidos: defiende
+ * de un peer comprometido o mal intencionado, y acota el daño de un bug ajeno.
+ * Al pasarse NO se corta el enlace —eso dejaría que una operación tonta rompa
+ * toda la federación—: se descarta la trama y se cuenta.
+ */
+const S2S_LIMITS = {
+    // Tráfico normal entre usuarios de nodos distintos: generoso, es agregado
+    // de TODOS los usuarios de ese peer.
+    relay:         { burst: 600, ratePerSec: 300 },
+    deliver:       { burst: 600, ratePerSec: 300 },
+    'chan-op':     { burst: 200, ratePerSec: 50 },
+    'chan-result': { burst: 200, ratePerSec: 50 },
+    'chan-event':  { burst: 400, ratePerSec: 200 },
+    'peer-gone':   { burst: 200, ratePerSec: 50 },
+    // ESTRICTO: canjear una cita es un acto humano, no de máquina. Ni el peer
+    // más ocupado necesita más de unos pocos por segundo.
+    'pair-redeem': { burst: 20, ratePerSec: 2 },
+    'pair-result': { burst: 20, ratePerSec: 2 },
+    __default__:   { burst: 100, ratePerSec: 25 }
+};
+
+function s2sLimitFor(op) {
+    const envBurst = Number.parseInt(process.env[`S2S_LIMIT_${String(op).toUpperCase().replace(/-/g, '_')}_BURST`] || '', 10);
+    const envRate = Number.parseFloat(process.env[`S2S_LIMIT_${String(op).toUpperCase().replace(/-/g, '_')}_RATE`] || '');
+    const base = S2S_LIMITS[op] || S2S_LIMITS.__default__;
+    return {
+        burst: Number.isFinite(envBurst) && envBurst > 0 ? envBurst : base.burst,
+        ratePerSec: Number.isFinite(envRate) && envRate > 0 ? envRate : base.ratePerSec
+    };
+}
+
+/** Cubetas por operación para UN peer. */
+class PeerBuckets {
+    constructor(now = Date.now()) { this.buckets = new Map(); this.dropped = 0; this.now = now; }
+
+    allow(op, now = Date.now()) {
+        let b = this.buckets.get(op);
+        if (!b) {
+            const { burst, ratePerSec } = s2sLimitFor(op);
+            b = { tokens: burst, burst, ratePerSec, last: now };
+            this.buckets.set(op, b);
+        }
+        const elapsed = Math.max(0, (now - b.last) / 1000);
+        b.last = now;
+        b.tokens = Math.min(b.burst, b.tokens + elapsed * b.ratePerSec);
+        if (b.tokens < 1) { this.dropped++; return false; }
+        b.tokens -= 1;
+        return true;
+    }
+}
 const HEARTBEAT_MS = 30000;
 const RETAIN_MAX = 500;          // tramas sin acuse que se guardan para reenviar
 const BACKOFF_MIN_MS = 500;
@@ -295,6 +355,7 @@ class Mesh {
         if (!this.identity) { try { ws.close(1011, 'nodo sin identidad'); } catch (_) {} return; }
         const nonce = newNonce();
         let peer = null;
+        const buckets = new PeerBuckets();
 
         const timer = setTimeout(() => {
             if (!peer) { try { ws.close(1008, 'handshake s2s sin completar'); } catch (_) {} }
@@ -349,6 +410,18 @@ class Mesh {
 
             if (f.t === 'bye') { try { ws.close(1000, 'bye'); } catch (_) {} return; }
             if (f.t !== 'msg' || typeof f.seq !== 'number') return;
+
+            // Límite por peer y por operación. Se acusa igual la trama descartada:
+            // el acuse es de RECEPCIÓN, y si no se acusara el emisor la reenviaría
+            // para siempre, convirtiendo el límite en un bucle infinito.
+            if (!buckets.allow(f.op)) {
+                if (buckets.dropped === 1 || buckets.dropped % 100 === 0) {
+                    this.log(`[mesh] límite s2s: descartadas ${buckets.dropped} tramas de ${peer.url} (última: ${f.op})`);
+                }
+                send({ t: 'ack', seq: f.seq });
+                return;
+            }
+
             // El acuse va SIEMPRE, incluso si la entrega no encuentra a nadie: es
             // acuse de recepción del nodo, no de entrega al usuario. Si no, el
             // emisor reenviaría para siempre algo que ya llegó.
