@@ -1005,7 +1005,16 @@ const server = http.createServer((req, res) => {
 });
 
 // Crear servidor WebSocket adjunto al servidor HTTP
-const wss = new WebSocket.Server({ server });
+// `maxPayload`: sin él, `ws` acepta frames de cualquier tamaño y una sola conexión
+// anónima podía reservar cientos de MB antes de que el rate limiter llegara a verla
+// (el límite se cobra DESPUÉS de recibir el frame entero). 1 MB es holgado para el
+// tráfico real del ecosistema: el tope por destinatario de la cola offline ya es 1 MB
+// (MAX_BYTES_PER_PUBKEY) y el túnel del ecosistema usa el mismo número.
+const MAX_FRAME_BYTES = Number(process.env.PROXY_MAX_FRAME_BYTES || 1024 * 1024);
+// Destinatarios máximos por mensaje (`to` + `to_publickey` sumados). El fan-out
+// más grande del ecosistema real es una sala de canal, muy por debajo de 64.
+const MAX_FANOUT_PER_MESSAGE = Number(process.env.PROXY_MAX_FANOUT || 64);
+const wss = new WebSocket.Server({ server, maxPayload: MAX_FRAME_BYTES });
 
 // Rate limiter (puede ser noop si RATE_LIMIT_DISABLED=1)
 let rateLimiter = createRateLimiter();
@@ -1196,6 +1205,23 @@ wss.on('connection', (ws, req) => {
                 const errorResponse = {
                     type: 'error',
                     error: 'Formato de mensaje inválido. Debe contener "to" o "to_publickey" y "message", o "type" para operaciones especiales'
+                };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+
+            // Tope de destinatarios por mensaje. El rate limiter cobra por FRAME
+            // (un `consume` por mensaje recibido), así que sin tope un solo frame
+            // permitido podía abanicarse a miles de destinos — y con federación
+            // cada destino se convierte además en tráfico hacia los peers. Con
+            // tope, el coste de un frame queda acotado por diseño.
+            const fanOutCount = (Array.isArray(message.to) ? message.to.length : (hasTokenTo ? 1 : 0))
+                + (Array.isArray(message.to_publickey) ? message.to_publickey.length : (hasPubkeyTo ? 1 : 0));
+            if (fanOutCount > MAX_FANOUT_PER_MESSAGE) {
+                const errorResponse = {
+                    type: 'error',
+                    error: `Demasiados destinatarios en un mensaje (${fanOutCount}); el máximo es ${MAX_FANOUT_PER_MESSAGE}`
                 };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));

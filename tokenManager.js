@@ -1,5 +1,7 @@
 // Token Manager para el sistema de tokens alfanuméricos cortos
 // Caracteres permitidos: 1-9, A-Z (sin 0 ni letras minúsculas)
+const crypto = require('crypto');
+
 const ALLOWED_CHARS = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 class TokenManager {
@@ -10,12 +12,16 @@ class TokenManager {
         this.tokenLength = 4;
     }
 
-    // Generar un token corto aleatorio de la longitud especificada
+    // Generar un token corto aleatorio de la longitud especificada.
+    // Usa el CSPRNG del sistema (`crypto.randomInt`), NO `Math.random()`: el token
+    // es un identificador que otros pueden intentar adivinar para escribirle a una
+    // conexión ajena, y `Math.random()` es predecible a partir de unas pocas
+    // muestras. `randomInt` además reparte uniforme sobre los 35 símbolos (rechaza
+    // el sesgo del módulo), cosa que el `Math.floor(rand*35)` tampoco garantizaba.
     generateRandomToken(length) {
         let token = '';
         for (let i = 0; i < length; i++) {
-            const randomIndex = Math.floor(Math.random() * ALLOWED_CHARS.length);
-            token += ALLOWED_CHARS[randomIndex];
+            token += ALLOWED_CHARS[crypto.randomInt(ALLOWED_CHARS.length)];
         }
         return token;
     }
@@ -29,21 +35,33 @@ class TokenManager {
     generateUniqueToken() {
         let attempts = 0;
         const maxAttempts = 100;
-        
+
         while (attempts < maxAttempts) {
             const token = this.generateRandomToken(this.tokenLength);
-            
+
             if (!this.isTokenInUse(token)) {
                 return token;
             }
-            
+
             attempts++;
         }
-        
-        // Si no se encontró token único, aumentar longitud temporalmente
-        const token = this.generateRandomToken(this.tokenLength + 1);
-        console.log(`Aumentando longitud de token a ${this.tokenLength + 1} caracteres temporalmente`);
-        return token;
+
+        // Si no se encontró token único, aumentar longitud. La rama larga TAMBIÉN
+        // comprueba unicidad: devolverlo a ciegas podía repetir un token ya vivo y
+        // `activeConnections.set` sobrescribía la conexión previa en silencio (el
+        // dueño del token viejo dejaba de recibir y nadie se enteraba).
+        for (let len = this.tokenLength + 1; len <= this.tokenLength + 4; len++) {
+            for (let i = 0; i < maxAttempts; i++) {
+                const token = this.generateRandomToken(len);
+                if (!this.isTokenInUse(token)) {
+                    console.log(`Aumentando longitud de token a ${len} caracteres temporalmente`);
+                    return token;
+                }
+            }
+        }
+        // Inalcanzable en la práctica (35^8 con el Map lleno); mejor fallar que
+        // devolver un duplicado.
+        throw new Error('No se pudo generar un token único');
     }
 
     // Asignar un token corto a una conexión
@@ -110,15 +128,24 @@ class TokenManager {
     }
 
     // Limpiar tokens inactivos (por si acaso hay fugas)
+    //
+    // Solo recoge HUÉRFANOS: entradas cuyo socket ya no está abierto. Antes barría
+    // por inactividad a secas y borraba de `activeTokens` un token cuya conexión
+    // seguía viva; como `server.js` rutea por su propio `activeConnections` (que no
+    // se tocaba), el token quedaba ruteable y a la vez libre para reasignar — dos
+    // conexiones con el mismo token y el `close` de la vieja borrando a la nueva.
+    // Un cliente sin heartbeat lo disparaba a los 10 minutos.
     cleanupInactiveTokens(maxInactiveMinutes = 10) {
         const now = Date.now();
         const maxInactiveMs = maxInactiveMinutes * 60 * 1000;
         const inactiveTokens = [];
-        
+
         for (const [token, info] of this.activeTokens) {
-            if (now - info.lastActivity > maxInactiveMs) {
-                inactiveTokens.push(token);
-            }
+            if (now - info.lastActivity <= maxInactiveMs) continue;
+            // OPEN(1) o CONNECTING(0): la conexión sigue en pie, no es un huérfano.
+            const state = info.ws && info.ws.readyState;
+            if (state === 0 || state === 1) continue;
+            inactiveTokens.push(token);
         }
         
         // Liberar tokens inactivos
