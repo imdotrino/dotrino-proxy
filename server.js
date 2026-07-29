@@ -62,8 +62,23 @@ const IDENTIFY_TS_TOLERANCE_MS = 5 * 60 * 1000;       // ±5 min
 // --- Federación s2s (opcional): reenviar mensajes por pubkey a proxies peer. ---
 // Apagada si PROXY_PEERS está vacío → el proxy se comporta EXACTAMENTE como antes.
 const PROXY_PEERS = (process.env.PROXY_PEERS || '').split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
-const FED_TOKEN = process.env.PROXY_FEDERATION_TOKEN || '';
+const PROXY_PUBLIC_URL = (process.env.PROXY_PUBLIC_URL || '').trim().replace(/\/+$/, '') || null;
 const HOME_TTL_MS = Number(process.env.PROXY_HOME_TTL_MS || 7 * 24 * 60 * 60 * 1000); // 7 días
+
+// Identidad criptográfica de ESTE nodo (llave del vault) + registro de peers.
+// Sustituye al secreto simétrico `PROXY_FEDERATION_TOKEN`: cada nodo firma lo que
+// manda y el receptor verifica contra la pubkey pineada del emisor, así que un
+// nodo no puede hablar en nombre de otro ni hace falta compartir un secreto.
+const nodeIdentityLib = require('./nodeIdentity');
+const { PeerRegistry } = require('./peers');
+const { serviceDir } = require('./vaultSecrets');
+let nodeIdentity = null;
+try { nodeIdentity = nodeIdentityLib.loadNodeIdentity(serviceDir()); }
+catch (e) { console.error('[fed] identidad de nodo inválida:', e.message); }
+const peerRegistry = new PeerRegistry({
+    urls: PROXY_PEERS, identity: nodeIdentity, persist, log: (...a) => console.log(...a)
+});
+const s2sReplay = new nodeIdentityLib.ReplayWindow();
 // "Soy el home de estas pubkeys" (identificaron acá). Set en RAM + respaldo SQLite.
 const homePubkeys = new Set(persist.loadHomes(Date.now() - HOME_TTL_MS));
 function registerHome(pubkey) {
@@ -75,16 +90,27 @@ function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(p
 
 // Reenvía un mensaje por pubkey a todos los peers (fire-and-forget). El payload
 // va opaco (cifrado E2E por el cliente); los proxies son tránsito ciego.
+// El sobre va FIRMADO con la llave de este nodo: el receptor sabe quién se lo
+// mandó sin que haya ningún secreto compartido de por medio. `ts` + `nonce`
+// cierran el replay (una trama capturada no se puede reenviar indefinidamente).
 function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt) {
     if (!PROXY_PEERS.length) return;
-    const body = JSON.stringify({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt });
+    if (!nodeIdentity) return;  // sin identidad no se puede firmar → no se federa
+    const body = {
+        v: 1, op: 'deliver',
+        from: nodeIdentity.pubkey,
+        ts: Date.now(),
+        nonce: nodeIdentityLib.newNonce(),
+        toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt
+    };
+    const payload = JSON.stringify({ body, signature: nodeIdentityLib.signBody(nodeIdentity, body) });
     for (const peer of PROXY_PEERS) {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 5000);
         fetch(`${peer}/federate`, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', ...(FED_TOKEN ? { 'x-proxy-token': FED_TOKEN } : {}) },
-            body, signal: ctrl.signal
+            headers: { 'content-type': 'application/json' },
+            body: payload, signal: ctrl.signal
         }).catch(e => console.warn(`[fed] forward a ${peer} falló:`, e.message)).finally(() => clearTimeout(t));
     }
 }
@@ -966,6 +992,21 @@ function validateSignatureBasic(channelData) {
 }
 
 // Crear servidor HTTP básico (WebSocket upgrade + healthcheck + federación s2s)
+/**
+ * Verifica un sobre s2s: firmado por un peer PINEADO, fresco y no repetido.
+ * Devuelve {ok:true, body, peer} o {ok:false, reason}.
+ */
+function verifyPeerEnvelope(envelope) {
+    const body = envelope && envelope.body;
+    const signature = envelope && envelope.signature;
+    if (!body || !signature || body.v !== 1) return { ok: false, reason: 'sobre s2s malformado' };
+    const peer = peerRegistry.byNodePubkey(body.from);
+    if (!peer) return { ok: false, reason: 'nodo emisor desconocido (no pineado)' };
+    if (!nodeIdentityLib.verifyBody(body, signature, peer.pubkey)) return { ok: false, reason: 'firma s2s inválida' };
+    if (!s2sReplay.accept(body.nonce, body.ts)) return { ok: false, reason: 'trama s2s repetida o fuera de ventana' };
+    return { ok: true, body, peer };
+}
+
 const server = http.createServer((req, res) => {
     if (req.url === '/health') {
         // CORS abierto: /health es una sonda pública (sin datos de usuario) que
@@ -978,18 +1019,45 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ ok: true }));
         return;
     }
+    // Anuncio autofirmado de este nodo: quién soy (pubkey) y qué prefijo uso.
+    // Es lo que un peer baja para pinearme. Público y sin datos de usuario.
+    if (req.url === '/node' && req.method === 'GET') {
+        const announcement = peerRegistry.selfAnnouncement(PROXY_PUBLIC_URL);
+        if (!announcement) { res.writeHead(503, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: 'nodo sin identidad (no enrolado al vault)' })); return; }
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+        res.end(JSON.stringify(announcement));
+        return;
+    }
+    // Diagnóstico de la malla: a quién tengo pineado. Sin datos de usuario (los
+    // nodos y sus prefijos son públicos, se anuncian en /node). Existe porque el
+    // fallo típico de la federación es asimétrico y silencioso: A tiene pineado a
+    // B pero B no a A, y desde fuera parece que "a veces no llegan los mensajes".
+    if (req.url === '/peers' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+        res.end(JSON.stringify({
+            self: nodeIdentity ? { prefix: nodeIdentity.prefix } : null,
+            configured: PROXY_PEERS,
+            peers: peerRegistry.known().map((p) => ({ url: p.url, prefix: p.prefix }))
+        }));
+        return;
+    }
     // Federación: un peer nos reenvía un mensaje por pubkey. Lo entregamos a
     // instancias locales o lo encolamos si somos el home. NO re-reenviamos.
     if (req.url === '/federate' && req.method === 'POST') {
-        // Requiere token SIEMPRE: sin él, /federate sería un inyector de mensajes
-        // abierto (cualquiera encolaría para cualquier identidad con home acá).
-        if (!FED_TOKEN || req.headers['x-proxy-token'] !== FED_TOKEN) { res.writeHead(401); res.end(); return; }
         let size = 0; const chunks = [];
         req.on('data', c => { size += c.length; if (size > 2 * 1024 * 1024) { req.destroy(); } else chunks.push(c); });
         req.on('end', () => {
             try {
-                const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-                const { toPubkey, fromPubkey, message, queuedAt, expiresAt } = body || {};
+                const envelope = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                // Sin firma válida de un peer PINEADO no se entrega nada: si no,
+                // /federate sería un inyector abierto (cualquiera encolaría para
+                // cualquier identidad con home acá). Antes esto lo guardaba un
+                // secreto simétrico compartido, que no distinguía QUÉ nodo hablaba.
+                const check = verifyPeerEnvelope(envelope);
+                if (!check.ok) { res.writeHead(401, { 'content-type': 'application/json' });
+                    res.end(JSON.stringify({ error: check.reason })); return; }
+                const { toPubkey, fromPubkey, message, queuedAt, expiresAt } = check.body;
                 if (typeof toPubkey !== 'string' || message === undefined) { res.writeHead(400); res.end(); return; }
                 const r = deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt);
                 res.writeHead(200, { 'content-type': 'application/json' });
@@ -2095,7 +2163,22 @@ function start(port = Number(PORT)) {
                 for (const pk of persist.loadHomes(cutoff)) homePubkeys.add(pk);
             } catch (e) { console.warn('[fed] purga de homes falló:', e.message); }
         }, 60 * 60 * 1000).unref();
-        if (PROXY_PEERS.length) console.log(`[fed] federación activa con ${PROXY_PEERS.length} peer(s): ${PROXY_PEERS.join(', ')}`);
+        if (PROXY_PEERS.length) {
+            console.log(`[fed] federación activa con ${PROXY_PEERS.length} peer(s): ${PROXY_PEERS.join(', ')}`);
+            if (!nodeIdentity) {
+                // Sin identidad no se puede firmar ni verificar: la federación queda
+                // inerte en vez de caer al secreto compartido de antes. Se dice fuerte
+                // porque el síntoma (nada cruza) es idéntico a no tener peers.
+                console.error('[fed] ESTE NODO NO TIENE IDENTIDAD (falta vault-service/service-identity.json):');
+                console.error('[fed] no puede firmar ni aceptar tramas s2s. Enrola el nodo: node enroll-vault.js …');
+            } else {
+                console.log(`[fed] identidad de nodo lista — prefijo ${nodeIdentity.prefix}`);
+                const restored = peerRegistry.load();
+                if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
+                peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));
+                peerRegistry.startRefresh();
+            }
+        }
 
         const onError = (err) => {
             server.removeListener('error', onError);
@@ -2148,6 +2231,7 @@ function stop() {
         clearInterval(tokenCleanupInterval);
         tokenCleanupInterval = null;
     }
+    peerRegistry.stopRefresh();
 
     // Cerrar todas las conexiones de cliente
     for (const [, conn] of activeConnections) {

@@ -57,6 +57,14 @@ function init(dbFile) {
             pubkey     TEXT PRIMARY KEY,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS peer_nodes (
+            url        TEXT PRIMARY KEY,
+            pubkey     TEXT NOT NULL,
+            prefix     TEXT NOT NULL,
+            pinned_at  INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_peer_prefix ON peer_nodes(prefix);
     `);
     return db;
 }
@@ -206,10 +214,40 @@ function loadDueScheduledPushes(now) {
     return db.prepare('SELECT * FROM scheduled_pushes WHERE next_fire <= ? ORDER BY next_fire ASC').all(now);
 }
 
+// ----- peer_nodes (federación: identidad pineada de cada proxy peer) -----
+// Se pinea la primera vez que el peer se anuncia por GET /node y NO se cambia
+// sola: si el mismo URL vuelve con otra pubkey, o si otra pubkey reclama un
+// prefijo ya tomado, se rechaza y se grita en el log. Un cambio legítimo de
+// llave se hace a mano (borrando la fila), que es exactamente cuando el
+// operador quiere enterarse.
+
+function loadPeerNodes() {
+    return db.prepare('SELECT url, pubkey, prefix, pinned_at, updated_at FROM peer_nodes').all();
+}
+
+function pinPeerNode(url, pubkey, prefix, now) {
+    db.prepare(`
+        INSERT INTO peer_nodes (url, pubkey, prefix, pinned_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+    `).run(url, pubkey, prefix, now, now);
+}
+
+function touchPeerNode(url, now) {
+    db.prepare('UPDATE peer_nodes SET updated_at = ? WHERE url = ?').run(now, url);
+}
+
+function deletePeerNode(url) {
+    db.prepare('DELETE FROM peer_nodes WHERE url = ?').run(url);
+}
+
 module.exports = {
     init,
     getMeta,
     setMeta,
+    loadPeerNodes,
+    pinPeerNode,
+    touchPeerNode,
+    deletePeerNode,
     insertScheduledPush,
     listScheduledPushesForPubkey,
     getScheduledPush,

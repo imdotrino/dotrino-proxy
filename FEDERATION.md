@@ -17,10 +17,37 @@ llega aunque el destinatario esté en OTRO proxio.
   **fallback** (sin pérdida; la app dedup por `mid`). El receptor federado
   entrega si está online, o encola si es el home; si no, descarta (no acumula en
   intermedios). **Sin re-reenvío → sin loops.**
-- **Config**: `PROXY_PEERS=https://peer1,https://peer2` (allowlist) +
-  `PROXY_FEDERATION_TOKEN` compartido. Apagado sin `PROXY_PEERS` (single-node).
+- **Config**: `PROXY_PEERS=https://peer1,https://peer2` (allowlist).
+  Apagado sin `PROXY_PEERS` (single-node). Ver también `PROXY_PUBLIC_URL` y
+  `PROXY_NODE_PREFIX` en `.env.example`.
 - **Seguridad**: el payload va E2E + firmado → los proxios son tránsito ciego.
-  `/federate` exige token. Firma de identidad estricta (no acepta inválidas).
+  Firma de identidad estricta (no acepta inválidas).
+
+### Identidad de nodo (quién es cada proxio)
+Cada nodo tiene una **llave propia** —la del vault, `vault-service/service-identity.json`,
+la misma con la que está enrolado— y la usa para hablar con los demás:
+
+- **`GET /node`** — anuncio **autofirmado**: `{body:{v,prefix,pubkey,url,ts,nonce}, signature}`.
+- **Pineo (TOFU)**: al arrancar, cada nodo baja el `/node` de sus peers y lo
+  **pinea** en SQLite (`peer_nodes`). Si después ese URL cambia de pubkey, o si
+  otra pubkey reclama un prefijo ya tomado, **se rechaza y se grita en el log**:
+  un takeover silencioso de prefijo sería secuestrar el espacio de nombres de
+  otro nodo entero. Un cambio legítimo de llave se hace a mano.
+- **`POST /federate`** exige un sobre **firmado por un peer pineado**, con `ts` +
+  `nonce` (ventana ±5 min y memoria de nonces) para cerrar el replay.
+- **Descubrimiento adaptativo**: mientras falte algún peer por pinear reintenta
+  cada 15 s; con todos pineados pasa a 10 min. Con un intervalo fijo largo, un
+  deploy simultáneo dejaba la federación andando **en un solo sentido** (A tenía
+  pineado a B pero B no a A) durante 10 minutos, que es peor que no andar porque
+  no se nota.
+- **`GET /peers`** — diagnóstico: mi prefijo, los peers configurados y los
+  pineados. Es lo primero que hay que mirar cuando "a veces no llegan".
+
+> **Se eliminó `PROXY_FEDERATION_TOKEN`.** Era un secreto simétrico compartido:
+> no distinguía QUÉ nodo hablaba, así que quien lo tuviera podía inyectar
+> mensajes haciéndose pasar por cualquier nodo, y vivía en texto plano en el
+> config de PM2. La firma por nodo lo reemplaza y además no hay nada que
+> compartir al sumar un nodo nuevo.
 
 ### Cliente: descubrimiento + selección
 - **Directorio**: `https://dotrino.com/nodes.json` lista los nodos. El cliente
