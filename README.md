@@ -82,8 +82,8 @@ el log y lo publica en **`GET /peers`** bajo `vault`:
 
 ```jsonc
 "vault": null                                        // al día
-"vault": { "motivo": "cambio", "desde": "…" }        // hay configuración sin aplicar
-"vault": { "motivo": "revocado", "desde": "…" }      // lo revocaron: re-enrólalo o bájalo
+"vault": { "reason": "changed", "since": "…" }        // hay configuración sin aplicar
+"vault": { "reason": "revoked", "since": "…" }      // lo revocaron: re-enrólalo o bájalo
 ```
 
 Cuando aparezca, reinícialo tú en el momento que menos duela.

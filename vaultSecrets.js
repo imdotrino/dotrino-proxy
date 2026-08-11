@@ -66,7 +66,7 @@ function isEnrolled(dir = serviceDir()) {
  * Si no está enrolado no hace nada: el proxy corre con su `.env`, que es el modo
  * normal de un self-hoster.
  */
-function startVaultSecrets({ dir = serviceDir(), onSecrets, onPendiente, log = console.log } = {}) {
+function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = console.log } = {}) {
     if (!isEnrolled(dir)) return { enabled: false };
     let stopped = false;
     let watcher = null;
@@ -109,17 +109,17 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPendiente, log = c
             // (o llega un aviso mal firmado, o se cae la conexión), callarlo deja
             // al operador creyendo que está avisable cuando no lo está.
             ns: NS, dir, log: (m) => log(String(m).replace(/^\[dotrino-env\]\s*/, '[vault] ')),
-            onUpdate: ({ motivo, ts }) => {
-                if (motivo === 'revocado') {
+            onUpdate: ({ reason, ts }) => {
+                if (reason === 'revoked') {
                     log('[vault] ⚠ la bóveda REVOCÓ a este proxio. Sigue transportando, pero no volverá');
                     log('[vault] ⚠ a leer configuración: re-enrólalo o bájalo.');
-                    onPendiente?.({ motivo, ts });
+                    onPending?.({ reason, ts });
                     return;
                 }
                 log('[vault] hay configuración NUEVA en la bóveda. No se aplica sola:');
                 log('[vault] reiniciar el proxio corta las conexiones de todo el ecosistema,');
                 log('[vault] así que el momento lo eliges tú. Reinícialo cuando puedas.');
-                onPendiente?.({ motivo, ts });
+                onPending?.({ reason, ts });
             }
         }).catch((e) => { log('[vault] sin escucha de cambios (' + e.message + ')'); return null; });
     })().catch((e) => log('[vault] carga de configuración abortada:', e.message));
