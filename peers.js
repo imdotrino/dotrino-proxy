@@ -50,6 +50,13 @@ class PeerRegistry {
     }
 
     /**
+     * La identidad se conoce DESPUÉS de construir el registro: leerla exige
+     * descifrar el archivo del vault, que es asíncrono (ver `nodeIdentity.js`).
+     * Se fija antes de arrancar la federación, nunca en caliente.
+     */
+    setIdentity(identity) { this.identity = identity; }
+
+    /**
      * Rehidrata desde SQLite lo ya pineado. Las filas cuyo id NO se corresponde
      * con su pubkey se DESCARTAN: pueden venir de un esquema viejo donde el id
      * se declaraba en vez de derivarse, y aceptarlas sería seguir confiando en

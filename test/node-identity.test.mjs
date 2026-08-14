@@ -249,3 +249,63 @@ describe('registro de peers', () => {
         expect(PeerRegistry.parseAnnouncement(a, 'https://yo')).toMatchObject({ nodeId: self.nodeId });
     });
 });
+
+/**
+ * El archivo del vault se lee con SU lector, no a mano: desde que existe el
+ * cifrado en reposo la lib lo deja cifrado al escribirlo, y aquí se parseaba en
+ * claro. El síntoma era el peor posible —el primer re-enrolamiento dejaba al nodo
+ * sin identidad, con la federación muda y sin ningún error— así que las dos
+ * formas se prueban de verdad, no de palabra.
+ */
+describe('lectura de la identidad del vault', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const { pathToFileURL } = require('url');
+    const { loadNodeIdentity } = require('../nodeIdentity');
+    /**
+     * El at-rest de la copia INSTALADA: es la que va a descifrar en producción.
+     * Por ruta y no por nombre de paquete, porque `atrest.js` no está en su mapa
+     * de `exports` (la lib no lo publica como API: aquí se usa para FABRICAR el
+     * archivo cifrado, que en la vida real escribe ella misma).
+     */
+    const ATREST = pathToFileURL(path.join(process.cwd(), 'node_modules/@dotrino/vault/src/atrest.js')).href;
+    const atrest = () => import(/* @vite-ignore */ ATREST);
+
+    let dir;
+    beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-service-')); });
+
+    const registro = () => {
+        const kp = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+        return {
+            v: 1, ns: 'proxy', iss: 'test-master', enrolledAt: Date.now(),
+            device: {
+                publickey: JSON.stringify(kp.publicKey.export({ format: 'jwk' })),
+                privateJwk: kp.privateKey.export({ format: 'jwk' }),
+                label: 'test', createdAt: Date.now()
+            }
+        };
+    };
+    const archivo = () => path.join(dir, 'service-identity.json');
+
+    it('lee el archivo EN CLARO (enrolamientos anteriores al at-rest)', async () => {
+        const rec = registro();
+        fs.writeFileSync(archivo(), JSON.stringify(rec, null, 2));
+        const id = await loadNodeIdentity(dir);
+        expect(id.pubkey).toBe(rec.device.publickey);
+        expect(id.nodeId).toBe(deriveNodeId(rec.device.publickey));
+    });
+
+    it('lee el archivo CIFRADO at-rest (lo que escribe la lib al re-enrolar)', async () => {
+        const rec = registro();
+        const { atRestFor } = await atrest();
+        fs.writeFileSync(archivo(), atRestFor(dir).encrypt(JSON.stringify(rec, null, 2)), { mode: 0o600 });
+        const id = await loadNodeIdentity(dir);
+        expect(id).not.toBeNull();
+        expect(id.nodeId).toBe(deriveNodeId(rec.device.publickey));
+    });
+
+    it('sin archivo no hay identidad (self-hoster sin vault)', async () => {
+        expect(await loadNodeIdentity(dir)).toBeNull();
+    });
+});

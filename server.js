@@ -72,15 +72,13 @@ const HOME_TTL_MS = Number(process.env.PROXY_HOME_TTL_MS || 7 * 24 * 60 * 60 * 1
 const nodeIdentityLib = require('./nodeIdentity');
 const { PeerRegistry } = require('./peers');
 const { serviceDir } = require('./vaultSecrets');
+// La identidad se carga en `initNodeIdentity()`, no aquí: leer el archivo del
+// vault es asíncrono (viene cifrado en reposo y lo descifra su lib). Hasta que
+// eso ocurra el nodo es "sin identidad", que es un estado que ya sabe manejar.
 let nodeIdentity = null;
-try { nodeIdentity = nodeIdentityLib.loadNodeIdentity(serviceDir()); }
-catch (e) { console.error('[fed] identidad de nodo inválida:', e.message); }
-// Las instancias que emite este nodo llevan su id delante: es lo que las hace
-// únicas en todo el ecosistema y ruteables sin preguntarle a nadie. El id se
-// DERIVA de la llave del nodo, así que nadie puede usar el ajeno.
-tokenManager.setNodeId(nodeIdentity && nodeIdentity.nodeId);
+let nodeIdentityReady = null;
 const peerRegistry = new PeerRegistry({
-    urls: PROXY_PEERS, identity: nodeIdentity, persist, log: (...a) => console.log(...a)
+    urls: PROXY_PEERS, identity: null, persist, log: (...a) => console.log(...a)
 });
 const s2sReplay = new nodeIdentityLib.ReplayWindow();
 
@@ -90,7 +88,7 @@ const s2sReplay = new nodeIdentityLib.ReplayWindow();
 const { Mesh } = require('./mesh');
 const mesh = new Mesh({
     urls: PROXY_PEERS,
-    identity: nodeIdentity,
+    identity: null,   // llega en `initNodeIdentity()`, antes de `mesh.start()`
     registry: peerRegistry,
     log: (...a) => console.log(...a),
     onDeliver: (payload) => {
@@ -158,6 +156,31 @@ const mesh = new Mesh({
         } catch (e) { console.warn('[mesh] pair-result falló:', e.message); }
     }
 });
+
+/**
+ * Carga la identidad del nodo y se la reparte a quien firma con ella. Corre UNA
+ * vez, al arrancar (`start()` la espera antes de escuchar), y por eso el registro
+ * y la malla se construyen sin identidad y la reciben aquí.
+ *
+ * Es asíncrono porque el archivo del vault viene cifrado en reposo y lo descifra
+ * su propia lib (ESM). No se hace en caliente: cambiar la identidad de un nodo
+ * cambia su id, y eso es un reinicio, no un ajuste.
+ */
+async function initNodeIdentity() {
+    if (nodeIdentityReady) return nodeIdentityReady;
+    nodeIdentityReady = (async () => {
+        try { nodeIdentity = await nodeIdentityLib.loadNodeIdentity(serviceDir()); }
+        catch (e) { console.error('[fed] identidad de nodo inválida:', e.message); nodeIdentity = null; }
+        // Las instancias que emite este nodo llevan su id delante: es lo que las
+        // hace únicas en todo el ecosistema y ruteables sin preguntarle a nadie.
+        // El id se DERIVA de la llave del nodo, así que nadie puede usar el ajeno.
+        tokenManager.setNodeId(nodeIdentity && nodeIdentity.nodeId);
+        peerRegistry.setIdentity(nodeIdentity);
+        mesh.setIdentity(nodeIdentity);
+        return nodeIdentity;
+    })();
+    return nodeIdentityReady;
+}
 
 // Citas de emparejamiento: el código corto que ve un humano. Ver pairingCodes.js.
 const { PairingCodes } = require('./pairingCodes');
@@ -2691,7 +2714,11 @@ let scheduledPushInterval = null;
  * @param {number} [port] Puerto a usar. 0 = puerto asignado por el OS. Default: PORT del entorno.
  * @returns {Promise<number>} Puerto efectivo en el que está escuchando.
  */
-function start(port = Number(PORT)) {
+async function start(port = Number(PORT)) {
+    // Antes de nada, la identidad: el id de nodo va delante de cada instancia que
+    // se emita, así que tiene que estar puesto ANTES de aceptar la primera
+    // conexión. Leerla es lo único asíncrono del arranque.
+    await initNodeIdentity();
     return new Promise((resolve, reject) => {
         channelCleanupInterval = setInterval(cleanupExpiredChannelEntries, 60 * 1000);
         tokenCleanupInterval = tokenManager.startCleanupInterval(5);

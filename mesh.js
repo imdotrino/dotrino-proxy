@@ -269,6 +269,17 @@ class Mesh {
         }
     }
 
+    /**
+     * La identidad llega después de construir la malla (leerla del vault es
+     * asíncrono, ver `nodeIdentity.js`), así que hay que bajarla también a los
+     * enlaces: la recibieron por constructor cuando todavía era null y firman
+     * con ella. Se llama antes de `start()`, nunca con enlaces vivos.
+     */
+    setIdentity(identity) {
+        this.identity = identity;
+        for (const l of this.links.values()) l.identity = identity;
+    }
+
     start() { for (const l of this.links.values()) l.start(); }
 
     stop() {

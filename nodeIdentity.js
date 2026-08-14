@@ -113,14 +113,11 @@ function nodeIdMatches(nodeId, pubkey) {
 }
 
 /**
- * Carga la identidad del nodo desde el directorio del servicio del vault.
- * Devuelve null si el nodo no está enrolado (self-hoster sin vault): en ese caso
- * no puede federar con firma y el arranque lo dice claro.
+ * La identidad del nodo a partir del registro que guarda el vault
+ * (`service-identity.json` ya parseado). Devuelve null si ese registro no trae
+ * un dispositivo con llave: sin ella no se puede federar con firma.
  */
-function loadNodeIdentity(dir) {
-    const file = path.join(dir, 'service-identity.json');
-    let raw;
-    try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return null; }
+function identityFromRecord(raw) {
     const device = raw && raw.device;
     if (!device || !device.publickey || !device.privateJwk) return null;
 
@@ -137,6 +134,45 @@ function loadNodeIdentity(dir) {
         nodeId,
         hint: hintOf(nodeId)
     };
+}
+
+/**
+ * Lee la identidad del nodo del directorio del servicio, con el LECTOR DEL VAULT
+ * (`readServiceIdentity`) y no a mano.
+ *
+ * Por qué importa: ese archivo lo escribe la lib del vault y desde que existe el
+ * cifrado en reposo lo deja CIFRADO (clave derivada de la máquina + `atrest.salt`
+ * del propio directorio). Aquí se leía con un `JSON.parse` pelado, que funcionaba
+ * solo porque el archivo venía en claro de un enrolamiento anterior: el primer
+ * re-enrolamiento —o la primera renovación de cert, que también reescribe— lo
+ * dejaba cifrado y este nodo arrancaba SIN IDENTIDAD, con el síntoma peor de
+ * todos: federación muda y un id de nodo que desaparece, sin que nada fallara de
+ * forma visible. Se delega en la lib, que sabe leer las dos formas, en vez de
+ * duplicar aquí la derivación de la clave.
+ *
+ * Es asíncrono porque la lib es ESM y esto es CommonJS; de ahí el `await import`.
+ * Devuelve null si el nodo no está enrolado (self-hoster sin vault): en ese caso
+ * no puede federar con firma y el arranque lo dice claro.
+ */
+async function loadNodeIdentity(dir) {
+    let raw = null;
+    try {
+        const { readServiceIdentity } = await import('@dotrino/vault/service');
+        raw = readServiceIdentity(dir);
+    } catch (e) {
+        // Sin la lib (instalación incompleta) solo se puede leer el formato en
+        // claro. Se dice, porque si el archivo está cifrado el nodo se queda sin
+        // identidad y hay que saber por qué.
+        console.error('[fed] no se pudo usar el lector del vault (%s); se intenta el formato en claro', e.message);
+        raw = readPlainIdentity(dir);
+    }
+    return identityFromRecord(raw);
+}
+
+/** El archivo tal cual, solo si está en claro. Reserva de `loadNodeIdentity`. */
+function readPlainIdentity(dir) {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, 'service-identity.json'), 'utf8')); }
+    catch (_) { return null; }
 }
 
 function privateKeyObject(privateJwk) {
@@ -217,6 +253,7 @@ module.exports = {
     hintOf,
     nodeIdMatches,
     loadNodeIdentity,
+    identityFromRecord,
     signBody,
     verifyBody,
     ReplayWindow,
