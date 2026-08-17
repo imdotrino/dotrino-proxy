@@ -261,6 +261,7 @@ class Mesh {
         this.log = log;
         this.links = new Map();     // url -> MeshLink
         this.inbound = new Map();   // pubkey del peer -> ws entrante
+        this.started = false;       // para que `setUrls` sepa si arrancar lo nuevo
         for (const url of urls) {
             this.links.set(url, new MeshLink({
                 url, identity, registry, log,
@@ -280,9 +281,35 @@ class Mesh {
         for (const l of this.links.values()) l.identity = identity;
     }
 
-    start() { for (const l of this.links.values()) l.start(); }
+    /**
+     * Cambia la lista de peers con la malla ya andando. Existe porque la lista la
+     * puede traer la bóveda DESPUÉS del arranque (el proxio nunca la espera, ver
+     * `applyFederationConfig` en server.js): el enlace que sobra se cierra, el que
+     * falta se crea, y el que ya estaba NO se toca — reconectarlo tiraría las
+     * tramas que tiene retenidas esperando acuse.
+     */
+    setUrls(urls = []) {
+        const want = new Set(urls);
+        for (const [url, link] of [...this.links]) {
+            if (want.has(url)) continue;
+            link.stop();
+            this.links.delete(url);
+        }
+        for (const url of urls) {
+            if (this.links.has(url)) continue;
+            const link = new MeshLink({
+                url, identity: this.identity, registry: this.registry, log: this.log,
+                onFrame: (f, l) => this._handleFrame(f, l)
+            });
+            this.links.set(url, link);
+            if (this.started) link.start();
+        }
+    }
+
+    start() { this.started = true; for (const l of this.links.values()) l.start(); }
 
     stop() {
+        this.started = false;
         for (const l of this.links.values()) l.stop();
         for (const ws of this.inbound.values()) { try { ws.close(); } catch (_) {} }
         this.inbound.clear();

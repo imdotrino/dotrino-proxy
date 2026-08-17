@@ -57,6 +57,17 @@ class PeerRegistry {
     setIdentity(identity) { this.identity = identity; }
 
     /**
+     * Cambia la lista de peers a descubrir. La trae la bóveda, que contesta
+     * después del arranque (ver `applyFederationConfig` en server.js).
+     *
+     * Lo PINEADO no se toca: quitar a un nodo de la lista deja de buscarlo, pero
+     * no lo desconoce —sus tramas firmadas se siguen verificando, igual que hoy
+     * tras un reinicio, porque el pineo vive en SQLite—. Dejar de confiar en un
+     * nodo es `deletePeerNode`, que es una decisión aparte y explícita.
+     */
+    setUrls(urls = []) { this.urls = urls; }
+
+    /**
      * Rehidrata desde SQLite lo ya pineado. Las filas cuyo id NO se corresponde
      * con su pubkey se DESCARTAN: pueden venir de un esquema viejo donde el id
      * se declaraba en vez de derivarse, y aceptarlas sería seguir confiando en

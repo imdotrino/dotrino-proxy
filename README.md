@@ -69,9 +69,18 @@ pidiendo configuración, porque el vault habla con sus servicios **por el proxio
 esperarlo sería esperar a alguien que necesita que el proxio ya esté escuchando.
 Así que el transporte levanta siempre con lo que haya y la configuración del vault
 se aplica cuando llega. Consecuencia honesta: lo que sólo se lee al arrancar
-(`PORT`, `HOST`, `PROXY_PEERS`, VAPID…) queda en el entorno pero **no toma efecto
-hasta el próximo reinicio**, y el log lo avisa en vez de dejarte creer que ya está.
-Lo que sí se re-aplica en caliente es TURN, con sus topes incluidos.
+(`PORT`, `HOST`, VAPID…) queda en el entorno pero **no toma efecto hasta el próximo
+reinicio**, y el log lo avisa en vez de dejarte creer que ya está.
+
+Lo que **sí** se re-aplica en caliente: **TURN** (con sus topes incluidos) y la
+**federación** —`PROXY_PEERS` y `PROXY_PUBLIC_URL`—. Esas dos entraron ahí porque son
+justamente las que cambian de una máquina a otra, o sea las que obligaban a mantener a
+mano un `.env` por VPS: ahora **la bóveda basta**. Si vienen en el `.env`, la malla
+levanta al escuchar; si no, levanta en cuanto aterriza el bundle, y si la lista cambia
+se ajusta sin reconectar los enlaces que siguen. Un peer que sale de la lista deja de
+buscarse pero **conserva su pineo** (dejar de confiar en un nodo es otra decisión, y es
+explícita). La federación puede llegar tarde sin que a nadie le cambie nada porque **no
+es el transporte**: un cliente conectado sigue mandando y recibiendo igual.
 
 **Cuando cambias algo en la bóveda, el proxio SE REINICIA.** Al guardar un secreto, la
 bóveda manda un aviso firmado a los agentes de su `ns`, y el proxio hace lo mismo que

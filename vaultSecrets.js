@@ -46,8 +46,14 @@ const NS = 'proxy';
  * nueva, y olvidarse falla en silencio (justo lo que pasó con PROXY_MAX_FANOUT).
  * Así al revés, una variable nueva cae sola en «avisa que hace falta reiniciar»,
  * que es el lado seguro del error.
+ *
+ * `PROXY_PEERS` y `PROXY_PUBLIC_URL` entraron aquí junto con `applyFederationConfig`
+ * (server.js): la federación se levanta o se ajusta cuando llega el bundle, así que
+ * ya no son de las que «solo se leen al arrancar» y avisar de un reinicio sería
+ * mentir. Son además las que distinguen a una máquina de otra, o sea justo las que
+ * no debían obligar a mantener un `.env` a mano en cada VPS.
  */
-const SE_REAPLICAN = /^TURN_/;
+const SE_REAPLICAN = /^TURN_|^PROXY_(PEERS|PUBLIC_URL)$/;
 
 function serviceDir() {
     return process.env.VAULT_SERVICE_DIR || path.join(__dirname, 'vault-service');

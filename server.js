@@ -61,8 +61,19 @@ const IDENTIFY_TS_TOLERANCE_MS = 5 * 60 * 1000;       // ±5 min
 
 // --- Federación s2s (opcional): reenviar mensajes por pubkey a proxies peer. ---
 // Apagada si PROXY_PEERS está vacío → el proxy se comporta EXACTAMENTE como antes.
-const PROXY_PEERS = (process.env.PROXY_PEERS || '').split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
-const PROXY_PUBLIC_URL = (process.env.PROXY_PUBLIC_URL || '').trim().replace(/\/+$/, '') || null;
+//
+// NO son `const`, y esa es la diferencia que hace que la bóveda mande también aquí.
+// El proxio nunca la espera para arrancar (se necesita a sí mismo para hablar con
+// ella), así que su configuración llega SIEMPRE tarde: con estas dos clavadas al
+// construir, la única forma de federar era tenerlas además en el `.env` de cada VPS
+// —o sea, mantener a mano en dos sitios justo lo que distingue a una máquina de
+// otra—. Ahora la federación se levanta cuando llega el bundle (`applyFederationConfig`),
+// y el `.env` deja de ser necesario para esto: si está, arranca antes; si no, arranca
+// al primer bundle.
+const parsePeerList = (v) => String(v || '').split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
+const parsePublicUrl = (v) => String(v || '').trim().replace(/\/+$/, '') || null;
+let PROXY_PEERS = parsePeerList(process.env.PROXY_PEERS);
+let PROXY_PUBLIC_URL = parsePublicUrl(process.env.PROXY_PUBLIC_URL);
 const HOME_TTL_MS = Number(process.env.PROXY_HOME_TTL_MS || 7 * 24 * 60 * 60 * 1000); // 7 días
 
 // Identidad criptográfica de ESTE nodo (llave del vault) + registro de peers.
@@ -180,6 +191,74 @@ async function initNodeIdentity() {
         return nodeIdentity;
     })();
     return nodeIdentityReady;
+}
+
+// ¿Ya se levantó la federación? Se arranca UNA vez, y puede ser en dos momentos
+// distintos: al escuchar (si los peers venían del `.env`) o cuando llega la
+// configuración de la bóveda (el caso normal desde que el `.env` no hace falta).
+let federationStarted = false;
+
+/**
+ * Levanta la federación con los peers que haya AHORA. Idempotente: llamarla de
+ * nuevo no reconecta nada, solo sirve para el segundo momento posible (el bundle
+ * de la bóveda llegando después de que el servidor ya escucha).
+ *
+ * @returns {boolean} si quedó andando
+ */
+function startFederation() {
+    if (federationStarted) return true;
+    if (!PROXY_PEERS.length) return false;
+    console.log(`[fed] federación activa con ${PROXY_PEERS.length} peer(s): ${PROXY_PEERS.join(', ')}`);
+    if (!nodeIdentity) {
+        // Sin identidad no se puede firmar ni verificar: la federación queda
+        // inerte en vez de caer al secreto compartido de antes. Se dice fuerte
+        // porque el síntoma (nada cruza) es idéntico a no tener peers.
+        console.error('[fed] ESTE NODO NO TIENE IDENTIDAD (falta vault-service/service-identity.json):');
+        console.error('[fed] no puede firmar ni aceptar tramas s2s. Enrola el nodo: node enroll-vault.js …');
+        return false;
+    }
+    console.log(`[fed] identidad de nodo lista — id ${nodeIdentity.nodeId}`);
+    const restored = peerRegistry.load();
+    if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
+    peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));
+    peerRegistry.startRefresh();
+    mesh.start();
+    federationStarted = true;
+    return true;
+}
+
+/**
+ * Re-lee del entorno lo que configura la federación, DESPUÉS de que la bóveda
+ * volcó su bundle encima. Es lo que hace que `PROXY_PEERS`/`PROXY_PUBLIC_URL` ya
+ * no tengan que estar en el `.env` de cada VPS.
+ *
+ * Por qué esto sí se re-aplica en caliente y casi nada más: la federación no es
+ * el transporte. Levantar la malla más tarde no le cambia nada a un cliente
+ * conectado —sigue mandando y recibiendo igual—, mientras que un `PORT` o un
+ * `HOST` a mitad de vuelo sí serían otro servidor. Lo caro sería lo contrario:
+ * quedarse sin federar hasta que alguien reinicie a mano.
+ *
+ * La lista puede además CAMBIAR (se suma o se quita un nodo): se ajusta la malla
+ * en vez de reiniciar, y el peer que se va conserva su pineo, igual que hoy —
+ * quitarlo de la lista no lo desconoce, para eso está `deletePeerNode`.
+ */
+function applyFederationConfig(log = console.log) {
+    const publicUrl = parsePublicUrl(process.env.PROXY_PUBLIC_URL);
+    if (publicUrl !== PROXY_PUBLIC_URL) {
+        PROXY_PUBLIC_URL = publicUrl;
+        // Se usa al responder `/node`, así que no hay nada que reiniciar: el
+        // próximo peer que venga a pinearme ya lee la buena.
+        log(`[fed] URL pública desde la bóveda: ${PROXY_PUBLIC_URL || '(ninguna)'}`);
+    }
+    const peers = parsePeerList(process.env.PROXY_PEERS);
+    if (peers.join(',') !== PROXY_PEERS.join(',')) {
+        PROXY_PEERS = peers;
+        peerRegistry.setUrls(peers);
+        mesh.setUrls(peers);
+        log(`[fed] peers desde la bóveda: ${peers.length ? peers.join(', ') : '(ninguno)'}`);
+        if (federationStarted) peerRegistry.discoverAll().catch((e) => log('[fed] descubrimiento falló: ' + e.message));
+    }
+    startFederation();
 }
 
 // Citas de emparejamiento: el código corto que ve un humano. Ver pairingCodes.js.
@@ -1445,6 +1524,9 @@ function startVaultSecretsLoop(log = console.log) {
             turnIssuer = createTurnIssuer();
             if (turnIssuer.enabled) log('[turn] llaves de Cloudflare desde el vault: TURN habilitado');
             else log('[vault] configuración recibida sin TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN sigue apagado');
+            // La federación también sale de la bóveda: si los peers vinieron ahí
+            // (y no en el `.env`), esta llamada es la que la levanta.
+            try { applyFederationConfig(log); } catch (e) { log('[fed] no se pudo aplicar la configuración de la bóveda: ' + e.message); }
             vaultPending = null;   // lo que acaba de llegar YA está aplicado
         },
         onPending: ({ reason, ts }) => {
@@ -2742,23 +2824,7 @@ async function start(port = Number(PORT)) {
                 for (const pk of persist.loadHomes(cutoff)) homePubkeys.add(pk);
             } catch (e) { console.warn('[fed] purga de homes falló:', e.message); }
         }, 60 * 60 * 1000).unref();
-        if (PROXY_PEERS.length) {
-            console.log(`[fed] federación activa con ${PROXY_PEERS.length} peer(s): ${PROXY_PEERS.join(', ')}`);
-            if (!nodeIdentity) {
-                // Sin identidad no se puede firmar ni verificar: la federación queda
-                // inerte en vez de caer al secreto compartido de antes. Se dice fuerte
-                // porque el síntoma (nada cruza) es idéntico a no tener peers.
-                console.error('[fed] ESTE NODO NO TIENE IDENTIDAD (falta vault-service/service-identity.json):');
-                console.error('[fed] no puede firmar ni aceptar tramas s2s. Enrola el nodo: node enroll-vault.js …');
-            } else {
-                console.log(`[fed] identidad de nodo lista — id ${nodeIdentity.nodeId}`);
-                const restored = peerRegistry.load();
-                if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
-                peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));
-                peerRegistry.startRefresh();
-                mesh.start();
-            }
-        }
+        startFederation();
 
         const onError = (err) => {
             server.removeListener('error', onError);
@@ -2876,7 +2942,10 @@ function setTurnIssuer(newIssuer) {
     turnIssuer = newIssuer;
 }
 
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer };
+// `applyFederationConfig` sale aquí por lo mismo que `setTurnIssuer`: es la costura
+// por donde entra la configuración de la bóveda, y probarla de verdad exige poder
+// llamarla con el servidor ya escuchando (que es justo cuando llega el bundle).
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el
