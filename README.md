@@ -91,6 +91,13 @@ unos segundos de transporte y los clientes reconectan solos.
 > **TURN apagado**, mientras `GET /peers` informaba educadamente de que había
 > configuración nueva.
 
+**Y si el aviso no llega, lo encuentra preguntando.** Un proxio incomunicado es
+justamente el que no recibe avisos, así que además de escuchar **compara**: en cada
+conexión con la bóveda —la primera y cada reconexión— pide su configuración y la
+contrasta con la que tiene en uso. Si difiere, se reinicia igual, y el log lo dice
+(`nadie avisó del cambio: lo encontró al comparar con la bóveda`), porque eso también
+delata que estuvo un rato sin conexión.
+
 El estado con la bóveda se publica igual en **`GET /peers`** bajo `vault`:
 
 ```jsonc

@@ -35,6 +35,25 @@ describe('aviso de la bóveda', () => {
         vi.useRealTimers();
     });
 
+    it('cambio encontrado al COMPARAR (nadie avisó) → se reinicia igual, y se dice', async () => {
+        // El agente no solo escucha: al conectar compara su configuración con la de la
+        // bóveda. Es lo que salva al proxio que estuvo incomunicado, que es precisamente
+        // el que no recibe avisos.
+        vi.useFakeTimers();
+        const exit = vi.fn();
+        const lines = [];
+        const decision = handleVaultUpdate(
+            { reason: 'changed', ts: 2, via: 'reconcile' },
+            { log: (m) => lines.push(m), exit, exitDelayMs: 300 }
+        );
+
+        expect(decision).toBe('restart');
+        expect(lines.some((l) => /nadie avisó/.test(l))).toBe(true);
+        vi.advanceTimersByTime(300);
+        expect(exit).toHaveBeenCalledTimes(1);
+        vi.useRealTimers();
+    });
+
     it('revocado → NO se reinicia: sigue transportando, que no necesita al vault', () => {
         const exit = vi.fn();
         const pendings = [];

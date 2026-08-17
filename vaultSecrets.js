@@ -125,6 +125,11 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
             // (o llega un aviso mal firmado, o se cae la conexión), callarlo deja
             // al operador creyendo que está avisable cuando no lo está.
             ns: NS, dir, log: (m) => log(String(m).replace(/^\[dotrino-env\]\s*/, '[vault] ')),
+            // Lo que este proceso tiene EN USO. Con esto, la comparación de la primera
+            // conexión ya sirve para algo: si la configuración cambió mientras el proxio
+            // arrancaba —o mientras no conseguía conectarse—, se entera ahí y no cuando
+            // alguien se acuerde. Un proxio caído es justo el que no recibe avisos.
+            applied: secrets,
             onUpdate: (info) => handleVaultUpdate(info, { log, onPending, exitDelayMs })
         }).catch((e) => { log('[vault] sin escucha de cambios (' + e.message + ')'); return null; });
     })().catch((e) => log('[vault] carga de configuración abortada:', e.message));
@@ -141,12 +146,18 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
  *
  * @returns {'restart'|'stay'} lo que decidió, para el test y para quien lea el log.
  */
-function handleVaultUpdate({ reason, ts }, { log = console.log, onPending, exitDelayMs = 300, exit } = {}) {
+function handleVaultUpdate({ reason, ts, via }, { log = console.log, onPending, exitDelayMs = 300, exit } = {}) {
     if (reason === 'revoked') {
         log('[vault] ⚠ la bóveda REVOCÓ a este proxio. Sigue transportando, pero no volverá');
         log('[vault] ⚠ a leer configuración: re-enrólalo o bájalo.');
         onPending?.({ reason, ts });
         return 'stay';
+    }
+    if (via === 'reconcile') {
+        // Nadie avisó: lo encontró preguntando al conectar. Decirlo importa porque es el
+        // síntoma de que el proxio estuvo un rato incomunicado — y de que el aviso, que
+        // es el camino rápido, se perdió por el camino.
+        log('[vault] nadie avisó del cambio: lo encontró al comparar con la bóveda.');
     }
     log('[vault] configuración NUEVA en la bóveda: terminando para arrancar con ella.');
     log('[vault] las conexiones se cortan unos segundos y los clientes reconectan solos;');
