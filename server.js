@@ -1355,11 +1355,11 @@ const server = http.createServer((req, res) => {
             configured: PROXY_PEERS,
             peers: peerRegistry.known().map((p) => ({ url: p.url, nodeId: p.nodeId })),
             mesh: mesh.stats(),
-            // El proxio es el único agente que NO se reinicia solo al cambiar su
-            // configuración (reiniciarlo corta el transporte de todos), así que el
-            // aviso tiene que quedar EN ALGÚN LADO donde se vea sin leer logs. Aquí:
-            // `null` = al día; con valor = hay configuración nueva esperando un
-            // reinicio, desde cuándo, y si además lo revocaron.
+            // `null` = al día. Con valor, y sin leer logs, dice qué pasó con la
+            // bóveda: `changed` se ve un instante (el proxio ya se está reiniciando
+            // para tomarla) y `revoked` se queda puesto, porque de esa no se sale
+            // sola — el proxio sigue transportando pero ya no lee configuración.
+            // Si un `changed` se queda ahí, es que el supervisor NO lo relanzó.
             vault: vaultPending
         }));
         return;
@@ -1415,14 +1415,20 @@ let rateLimiter = createRateLimiter();
 // Sin llaves: enabled:false (los clientes quedan STUN-only).
 let turnIssuer = createTurnIssuer();
 let vaultSecretsHandle = null;
-// Configuración nueva en la bóveda que este proxio NO aplicó (porque no se
-// reinicia solo). Se expone en `GET /peers` para que se vea sin leer logs.
+// Lo último que dijo la bóveda y que este proceso NO tiene aplicado. Se expone en
+// `GET /peers` para que se vea sin leer logs. Con `changed` dura lo que tarda el
+// reinicio; con `revoked` se queda, que es el caso en el que hay que hacer algo.
 let vaultPending = null;
 
 // El proxy es transporte puro (sin secretos en su core): arranca SIEMPRE con lo
 // que tenga en el `.env`, y la configuración del vault se aplica cuando llega.
 // No se la espera: el vault habla con sus servicios POR EL PROXY, así que un
 // proxy bloqueado esperándolo esperaría a alguien que lo necesita escuchando.
+//
+// Eso —servir sin haber recibido nunca las variables— es LO ÚNICO que lo hace
+// distinto del resto de agentes. Cuando la bóveda avisa de un cambio sí se
+// reinicia como todos (`vaultSecrets.js`): rotar una llave no sirve de nada si el
+// proceso sigue vivo con la vieja en memoria.
 function startVaultSecretsLoop(log = console.log) {
     const { startVaultSecrets } = require('./vaultSecrets');
     vaultSecretsHandle = startVaultSecrets({

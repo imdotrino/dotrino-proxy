@@ -73,20 +73,36 @@ se aplica cuando llega. Consecuencia honesta: lo que sólo se lee al arrancar
 hasta el próximo reinicio**, y el log lo avisa en vez de dejarte creer que ya está.
 Lo que sí se re-aplica en caliente es TURN, con sus topes incluidos.
 
-**Cuando cambias algo en la bóveda, avisa.** Al guardar un secreto, la bóveda manda
-un aviso firmado a los agentes de su `ns`. El agente estándar **termina** y su
-supervisor lo levanta limpio —así lee todo fresco y, sobre todo, el valor viejo deja
-de existir en su memoria—, pero **el proxio no**: reiniciarlo corta las conexiones de
-todo el ecosistema, incluida la de la bóveda que mandó el aviso. Lo anota, lo dice en
-el log y lo publica en **`GET /peers`** bajo `vault`:
+**Cuando cambias algo en la bóveda, el proxio SE REINICIA.** Al guardar un secreto, la
+bóveda manda un aviso firmado a los agentes de su `ns`, y el proxio hace lo mismo que
+cualquier otro: **termina**, y su supervisor (pm2, systemd con `Restart=always`) lo
+levanta limpio. Así lee todo fresco y, sobre todo, **el valor viejo deja de existir en
+su memoria** — que es la razón de rotar una llave: casi siempre se rota porque se
+filtró, y en JavaScript un secreto no se puede borrar de un proceso vivo. Se cortan
+unos segundos de transporte y los clientes reconectan solos.
+
+> Lo que hace distinto al proxio es **el arranque, no esto**: es el único que **sirve
+> sin haber recibido nunca las variables del vault** (arriba, *Lo que NO hace: esperar
+> al vault*). Por eso reiniciarse no lo puede dejar colgado — al volver, el transporte
+> está en pie antes de que llegue el bundle.
+>
+> Estuvo al revés —anotaba el aviso y lo dejaba a tu criterio— y salió caro: las llaves
+> de TURN pasaron tres días guardadas en la bóveda con el proxio corriendo sin ellas y
+> **TURN apagado**, mientras `GET /peers` informaba educadamente de que había
+> configuración nueva.
+
+El estado con la bóveda se publica igual en **`GET /peers`** bajo `vault`:
 
 ```jsonc
 "vault": null                                        // al día
-"vault": { "reason": "changed", "since": "…" }        // hay configuración sin aplicar
+"vault": { "reason": "changed", "since": "…" }        // se está reiniciando para tomarla
 "vault": { "reason": "revoked", "since": "…" }      // lo revocaron: re-enrólalo o bájalo
 ```
 
-Cuando aparezca, reinícialo tú en el momento que menos duela.
+Un `changed` que se queda ahí significa que **el supervisor no lo relanzó**. La
+**revocación** es el caso en que NO se reinicia: un proxio revocado sigue
+transportando (para eso no necesita al vault), pero ya no lee configuración — salir
+apagaría el transporte de todos sin arreglar nada, porque al volver seguiría revocado.
 
 **Identidad.** Un agente tiene **una** identidad y se la cede el vault: no adopta
 cuentas y re-enrolar **reemplaza** la anterior. En el proxio esa llave es además su

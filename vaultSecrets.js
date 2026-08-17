@@ -66,7 +66,7 @@ function isEnrolled(dir = serviceDir()) {
  * Si no está enrolado no hace nada: el proxy corre con su `.env`, que es el modo
  * normal de un self-hoster.
  */
-function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = console.log } = {}) {
+function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = console.log, exitDelayMs = 300 } = {}) {
     if (!isEnrolled(dir)) return { enabled: false };
     let stopped = false;
     let watcher = null;
@@ -94,33 +94,38 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
         }
         onSecrets(secrets, { injected, overridden });
 
-        // ESCUCHA de cambios. El proxio es el ÚNICO agente que NO se apaga al
-        // recibir el aviso: reiniciarlo corta todas las conexiones del ecosistema
-        // —incluida la de la bóveda que mandó el aviso—, así que un fallo aquí no
-        // se degrada, se cae todo. Lo anota y lo deja a la vista en `GET /node`;
-        // el reinicio lo decide un humano o el despliegue.
+        // ESCUCHA de cambios: llega el aviso, el proxio SE REINICIA, como cualquier
+        // otro agente del ecosistema.
         //
-        // Con la revocación, en cambio, sí conviene ser tajante en el mensaje: un
-        // proxio revocado sigue transportando (es su trabajo y no necesita al
-        // vault para eso), pero ya no puede leer configuración ni federarse con
-        // identidad válida, y eso hay que gritarlo.
+        // LO QUE HACE DISTINTO AL PROXIO ES EL ARRANQUE, no esto: **puede servir sin
+        // haber recibido nunca las variables del vault** —arriba, `applyEnv` sin
+        // bloquear— y por eso funciona desde el primer segundo. Esa es la excepción y
+        // sigue en pie; reiniciarse al recibir un cambio no la toca, porque al volver
+        // el transporte está en pie antes de que llegue el bundle.
+        //
+        // Estuvo al revés —anotaba el aviso y esperaba a que un humano eligiera el
+        // momento— y el resultado se vio el 2026-08-17: las llaves de TURN llevaban
+        // tres días guardadas en la bóveda y el proxio seguía corriendo sin ellas, con
+        // TURN apagado, mientras `GET /peers` decía tranquilamente que había
+        // «configuración nueva». Un aviso que nadie obedece no es una medida.
+        //
+        // Y el fondo del asunto: una variable se rota casi siempre PORQUE SE FILTRÓ.
+        // Mientras el proceso siga vivo, el valor viejo sigue en su memoria (en JS un
+        // string no se puede borrar) y sigue siendo el que usa. Unos segundos sin
+        // transporte —los clientes reconectan solos— son baratos al lado de seguir
+        // operando con una llave que ya no debería existir. Decisión del dueño.
+        //
+        // La revocación es el otro caso, y ahí NO se reinicia: un proxio revocado
+        // sigue transportando (es su trabajo y no necesita al vault para eso), pero
+        // ya no puede leer configuración ni federarse con identidad válida. Salir
+        // sería apagar el transporte de todos sin arreglar nada, porque al volver
+        // seguiría revocado.
         watcher = await watchEnv({
             // Con el log del proxio y NO `quiet`: si la escucha no se establece
             // (o llega un aviso mal firmado, o se cae la conexión), callarlo deja
             // al operador creyendo que está avisable cuando no lo está.
             ns: NS, dir, log: (m) => log(String(m).replace(/^\[dotrino-env\]\s*/, '[vault] ')),
-            onUpdate: ({ reason, ts }) => {
-                if (reason === 'revoked') {
-                    log('[vault] ⚠ la bóveda REVOCÓ a este proxio. Sigue transportando, pero no volverá');
-                    log('[vault] ⚠ a leer configuración: re-enrólalo o bájalo.');
-                    onPending?.({ reason, ts });
-                    return;
-                }
-                log('[vault] hay configuración NUEVA en la bóveda. No se aplica sola:');
-                log('[vault] reiniciar el proxio corta las conexiones de todo el ecosistema,');
-                log('[vault] así que el momento lo eliges tú. Reinícialo cuando puedas.');
-                onPending?.({ reason, ts });
-            }
+            onUpdate: (info) => handleVaultUpdate(info, { log, onPending, exitDelayMs })
         }).catch((e) => { log('[vault] sin escucha de cambios (' + e.message + ')'); return null; });
     })().catch((e) => log('[vault] carga de configuración abortada:', e.message));
     return {
@@ -129,4 +134,31 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
     };
 }
 
-module.exports = { startVaultSecrets, isEnrolled, serviceDir, NS, SE_REAPLICAN };
+/**
+ * Qué hacer con lo que dice la bóveda. Aparte y exportado para poder probarlo: es una
+ * decisión de seguridad (¿me muero o sigo?) y no se prueba sola dentro de un `await`
+ * que necesita vault, proxy y una identidad enrolada.
+ *
+ * @returns {'restart'|'stay'} lo que decidió, para el test y para quien lea el log.
+ */
+function handleVaultUpdate({ reason, ts }, { log = console.log, onPending, exitDelayMs = 300, exit } = {}) {
+    if (reason === 'revoked') {
+        log('[vault] ⚠ la bóveda REVOCÓ a este proxio. Sigue transportando, pero no volverá');
+        log('[vault] ⚠ a leer configuración: re-enrólalo o bájalo.');
+        onPending?.({ reason, ts });
+        return 'stay';
+    }
+    log('[vault] configuración NUEVA en la bóveda: terminando para arrancar con ella.');
+    log('[vault] las conexiones se cortan unos segundos y los clientes reconectan solos;');
+    log('[vault] seguir vivo dejaría en memoria la llave que se acaba de rotar.');
+    onPending?.({ reason, ts });
+    // Salida LIMPIA (0): lo levanta su supervisor (pm2/systemd `Restart=always`).
+    // Con retraso corto a propósito — la salida de un proceso supervisado va por una
+    // tubería y `process.exit()` en seco se come el log que explica por qué se murió,
+    // que es lo único que va a mirar quien lo encuentre reiniciado.
+    const salir = exit || (() => process.exit(0));
+    setTimeout(salir, exitDelayMs).unref?.();
+    return 'restart';
+}
+
+module.exports = { startVaultSecrets, handleVaultUpdate, isEnrolled, serviceDir, NS, SE_REAPLICAN };
