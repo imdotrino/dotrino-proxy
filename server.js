@@ -197,6 +197,25 @@ async function initNodeIdentity() {
 // distintos: al escuchar (si los peers venían del `.env`) o cuando llega la
 // configuración de la bóveda (el caso normal desde que el `.env` no hace falta).
 let federationStarted = false;
+let pinsLoaded = false;
+
+/**
+ * Rehidrata los pineos de SQLite. Se hace AL ARRANCAR, aunque todavía no haya
+ * peers configurados, y no dentro de `startFederation`: lo pineado no depende de
+ * la lista —es quién ya conozco, no a quién busco— y un peer que nos llama
+ * mientras esperamos a la bóveda tiene que poder entrar.
+ *
+ * Sin esto había una ventana real: el proxio que arranca sin `PROXY_PEERS` en su
+ * `.env` (o sea, el caso normal ahora) rechazaba el enlace entrante del otro nodo
+ * con «nodo entrante desconocido» hasta que llegara el bundle. El peer reintenta,
+ * así que se arreglaba solo, pero era ruido con pinta de fallo de seguridad.
+ */
+function loadPeerPins() {
+    if (pinsLoaded) return;
+    pinsLoaded = true;
+    const restored = peerRegistry.load();
+    if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
+}
 
 /**
  * Levanta la federación con los peers que haya AHORA. Idempotente: llamarla de
@@ -218,8 +237,7 @@ function startFederation() {
         return false;
     }
     console.log(`[fed] identidad de nodo lista — id ${nodeIdentity.nodeId}`);
-    const restored = peerRegistry.load();
-    if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
+    loadPeerPins();
     peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));
     peerRegistry.startRefresh();
     mesh.start();
@@ -2807,6 +2825,10 @@ async function start(port = Number(PORT)) {
     // se emita, así que tiene que estar puesto ANTES de aceptar la primera
     // conexión. Leerla es lo único asíncrono del arranque.
     await initNodeIdentity();
+    // Quién ya conozco, antes de aceptar nada: la federación puede tardar en
+    // levantarse (la configura la bóveda), pero un peer ya pineado que llame
+    // mientras tanto no tiene por qué rebotar.
+    if (nodeIdentity) loadPeerPins();
     return new Promise((resolve, reject) => {
         channelCleanupInterval = setInterval(cleanupExpiredChannelEntries, 60 * 1000);
         tokenCleanupInterval = tokenManager.startCleanupInterval(5);
