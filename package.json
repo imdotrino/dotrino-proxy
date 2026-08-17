@@ -14,7 +14,7 @@
   "dependencies": {
     "@dotrino/identity": "0.33.0",
     "@dotrino/proxy-client": "0.10.0",
-    "@dotrino/vault": "0.20.0",
+    "@dotrino/vault": "0.24.0",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.0.0",
     "web-push": "^3.6.7",
