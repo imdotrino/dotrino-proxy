@@ -1597,6 +1597,12 @@ wss.on('connection', (ws, req) => {
     
     // Asociar el token con el WebSocket
     ws.token = token;
+    // Latido del servidor: un cliente que murió sin cerrar (proceso matado, red
+    // caída) deja el socket medio abierto y su token seguía publicado en los
+    // canales hasta los 20 min de expiración. Con pong marcamos vivo; el barrido
+    // de abajo termina al que no contestó y así `close` limpia sus canales ya.
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     
     // Enviar información al cliente.
     // `instance` es el identificador de ESTA conexión, ya cualificado por nodo:
@@ -2811,6 +2817,18 @@ wss.on('connection', (ws, req) => {
 
 // Handles de intervalos para poder limpiarlos en stop()
 let channelCleanupInterval = null;
+let livenessInterval = null;
+const WS_LIVENESS_MS = 30 * 1000;
+
+/** Termina los clientes que no contestaron el ping anterior y manda el siguiente. */
+function sweepDeadClients() {
+    for (const [, conn] of activeConnections) {
+        const ws = conn.ws;
+        if (ws.isAlive === false) { try { ws.terminate(); } catch (_) {} continue; }
+        ws.isAlive = false;
+        try { ws.ping(); } catch (_) {}
+    }
+}
 let tokenCleanupInterval = null;
 let offlineQueueInterval = null;
 let scheduledPushInterval = null;
@@ -2831,6 +2849,7 @@ async function start(port = Number(PORT)) {
     if (nodeIdentity) loadPeerPins();
     return new Promise((resolve, reject) => {
         channelCleanupInterval = setInterval(cleanupExpiredChannelEntries, 60 * 1000);
+        livenessInterval = setInterval(sweepDeadClients, WS_LIVENESS_MS);
         tokenCleanupInterval = tokenManager.startCleanupInterval(5);
         pairingCodes.startCleanup();
         offlineQueueInterval = setInterval(cleanupOfflineQueues, 60 * 1000);
@@ -2886,6 +2905,10 @@ function stop() {
     if (channelCleanupInterval) {
         clearInterval(channelCleanupInterval);
         channelCleanupInterval = null;
+    }
+    if (livenessInterval) {
+        clearInterval(livenessInterval);
+        livenessInterval = null;
     }
     if (offlineQueueInterval) {
         clearInterval(offlineQueueInterval);
