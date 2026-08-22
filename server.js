@@ -783,6 +783,7 @@ function verifyActaMembership(acta, deviceJwkStr) {
 // (subscribe/unsubscribe firmados); aquí solo guardamos la copia que el
 // servidor necesita para poder timbrar. Persiste en SQLite (ver persistence.js).
 const webpush = require('web-push');
+const { ringFcm, fcmEnabled } = require('./fcm');
 
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@dotrino.com';
 
@@ -816,6 +817,7 @@ const pushEnabled = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (pushEnabled) {
     webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
     console.log(`[push] Web Push habilitado (VAPID ${_vapid.source}).`);
+    console.log(fcmEnabled() ? '[push] FCM enabled (service account from FCM_SERVICE_ACCOUNT_B64).' : '[push] FCM off: no FCM_SERVICE_ACCOUNT_B64 (native app will not be rung).');
 } else {
     console.warn('[push] VAPID no disponible: el timbre push queda deshabilitado (la cola offline sigue funcionando).');
 }
@@ -839,10 +841,19 @@ function removePushSubscription(pubkey) {
 // Dispara el "timbre" (sin contenido). Best-effort: si la subscription está
 // muerta (404/410) la borramos; el mensaje ya quedó encolado de todos modos.
 function ringPush(pubkey, extra) {
-    if (!pushEnabled) return;
     const sub = pushSubscriptions.get(pubkey);
     if (!sub) return;
-    const payload = JSON.stringify({ type: 'ring', ts: Date.now(), ...(extra || {}) });
+    const ring = { type: 'ring', ts: Date.now(), ...(extra || {}) };
+    // App nativa (FCM): la suscripción es `{ kind:'fcm', token }`, no una PushSubscription.
+    if (sub.kind === 'fcm') {
+        ringFcm(sub.token, ring).then((r) => {
+            if (r.gone) { removePushSubscription(pubkey); console.log('[push] fcm token gone: subscription removed'); }
+            else if (!r.ok && !r.disabled) console.error('[push] fcm error:', r.status, r.body);
+        }).catch((e) => console.error('[push] fcm error:', e.message));
+        return;
+    }
+    if (!pushEnabled) return;
+    const payload = JSON.stringify(ring);
     webpush.sendNotification(sub, payload, { TTL: OFFLINE_TTL_MS / 1000 })
         .catch((err) => {
             const code = err && err.statusCode;
@@ -2359,6 +2370,15 @@ wss.on('connection', (ws, req) => {
                     applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
                 }
             }
+            // Dos formas: la PushSubscription del navegador (endpoint + keys) o el token de
+            // la app nativa (`{ kind:'fcm', token }`). Cualquier otra cosa no es una suscripción.
+            const isWeb = subscription && typeof subscription.endpoint === 'string';
+            const isFcm = subscription && subscription.kind === 'fcm' && typeof subscription.token === 'string' && subscription.token.length > 20 && subscription.token.length < 4096;
+            if (!isWeb && !isFcm) {
+                const e = { type: 'error', error: 'push-subscribe.subscription: expected a PushSubscription or { kind:"fcm", token }' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            if (isFcm) subscription = { kind: 'fcm', token: subscription.token };
             setPushSubscription(data.publickey, subscription);
             const response = { type: 'push-subscribed', publickey: data.publickey };
             applyMessageIds(response, message);
