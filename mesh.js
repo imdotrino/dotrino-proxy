@@ -355,10 +355,24 @@ class Mesh {
         return this.links.get(peer.url) || null;
     }
 
-    /** Manda una operación a UN nodo concreto. Devuelve false si no hay enlace. */
+    /**
+     * Manda una operación a UN nodo concreto. Devuelve false si no hay enlace **por el que
+     * pueda salir**, que no es lo mismo que «no hay peer».
+     *
+     * Lo efímero (`retain:false`) no se guarda para después, así que con el enlace caído no
+     * va a salir nunca: decir que sí es mandar al que llama a esperar un timeout que aquí ya
+     * sabíamos. Pasaba con las operaciones de canal: durante la ventana de reconexión del
+     * peer, `forwardChannelOp` se creía enviado y el cliente se comía 6 s antes de un «el
+     * nodo dueño del canal no respondió», en vez del «sin enlace» inmediato que le sirve
+     * para reintentar. Es el mismo criterio que ya aplicaba `relayTo`.
+     *
+     * Lo retenido (`retain:true`, el default) sí se encola con el enlace caído: para eso
+     * está, y sale en cuanto vuelve.
+     */
     sendTo(nodePubkey, op, payload, opts = {}) {
         const link = this.linkForNode(nodePubkey);
         if (!link) return false;
+        if (opts.retain === false && !link.ready) return false;
         link.send(op, payload, opts);
         return true;
     }
