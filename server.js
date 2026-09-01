@@ -749,6 +749,24 @@ function verifyDeviceCert(cert, deviceJwkStr) {
     return iss;
 }
 
+/**
+ * ¿El acta le deja sellar a esta llave? Sellar es un PERMISO de miembro (`sealer`); en las
+ * actas viejas (v1/v2) era el campo `sealer`, que se traduce al leerlas. Es la misma regla
+ * que `canSeal`/`sealersOf` de @dotrino/identity, escrita aquí porque el proxio no importa
+ * el pilar — si alguna vez divergen, manda el pilar.
+ */
+function puedeSellar(acta, pub) {
+    if (acta.v <= 2 && acta.sealer === pub) return true;
+    const m = (acta.members || []).find(x => x && x.pub === pub);
+    if (!m || !Array.isArray(m.caps) || !m.caps.includes('sealer')) return false;
+    // Una renuncia QUITA permisos y es unilateral: viaja dentro del acta y hay que restarla,
+    // o una llave que ya se apartó seguiría valiendo aquí.
+    for (const r of (acta.renounced || [])) {
+        if (r && r.member === pub && Array.isArray(r.caps) && r.caps.includes('sealer')) return false;
+    }
+    return true;
+}
+
 // "Un perfil, muchas llaves": el ACTA DE PERFIL dice qué llaves son de la misma persona.
 // Si el cliente la presenta al identificarse, este proxy la verifica (va firmada por quien
 // la selló) y registra el token TAMBIÉN bajo el `profileId` → escribirle a la PERSONA llega
@@ -757,12 +775,26 @@ function verifyDeviceCert(cert, deviceJwkStr) {
 // El proxy no decide nada de política: solo comprueba que el acta esté bien firmada y que
 // quien se identifica sea miembro. Si mienten, lo peor que consiguen es enrutarse mensajes
 // a sí mismos. Ver `dotrino-vault/docs/acta-de-perfil.md`.
+// VERSIONES QUE SE LEEN. Esto exigía `v === 1` y el campo `sealer`, y los dos murieron:
+// el acta va por la v5 y `sealer` se quitó al volverlo un PERMISO («SEAL es el master»).
+// O sea que esta función llevaba versiones devolviendo `null` para TODA acta real y el
+// proxio no ataba el `profileId` de nadie. No se notó porque la bóveda se identificaba con
+// la maestra, que no pasa por aquí — y justamente eso es lo que se quiere dejar de hacer.
+const ACTA_VERSIONS = [1, 2, 3, 4, 5];
+
 function verifyActaMembership(acta, deviceJwkStr) {
-    if (!acta || typeof acta !== 'object' || acta.v !== 1) return null;
+    if (!acta || typeof acta !== 'object' || !ACTA_VERSIONS.includes(acta.v)) return null;
     const { profileId, sealer, sealedBy, members, sig } = acta;
-    if (typeof profileId !== 'string' || typeof sealer !== 'string' || typeof sealedBy !== 'string') return null;
+    if (typeof profileId !== 'string' || typeof sealedBy !== 'string') return null;
+    // `sealer` solo existe en las actas viejas (v1/v2). Si está, tiene que ser una string;
+    // si no, quien selló lo dice `sealedBy` y punto.
+    if (sealer !== undefined && typeof sealer !== 'string') return null;
     if (typeof sig !== 'string' || !Array.isArray(members)) return null;
     if (!members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
+    // QUIEN SELLÓ TIENE QUE PODER SELLAR, según la propia acta. Sin esto bastaba con
+    // firmarla con cualquier llave y decir que es tuya: la firma cuadraba —la había hecho
+    // el que la presentaba— y el proxio ataba el `profileId` de otra persona.
+    if (!puedeSellar(acta, sealedBy)) return null;
     let sealerJwk; try { sealerJwk = JSON.parse(sealedBy); } catch { return null; }
     // El cuerpo firmado es el acta SIN `sig` y SIN `card` — tiene que coincidir exactamente
     // con `actaBody()` de @dotrino/identity/acta, que es quien la firma. La tarjeta va aparte
@@ -3010,7 +3042,7 @@ function setTurnIssuer(newIssuer) {
 // `applyFederationConfig` sale aquí por lo mismo que `setTurnIssuer`: es la costura
 // por donde entra la configuración de la bóveda, y probarla de verdad exige poder
 // llamarla con el servidor ya escuchando (que es justo cuando llega el bundle).
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig };
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, puedeSellar };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el
