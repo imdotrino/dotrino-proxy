@@ -70,6 +70,34 @@ describe('verifyActaMembership', () => {
     expect(verifyActaMembership(futura, master.publickey)).toBe(null)
   })
 
+  it('NO se puede secuestrar el perfil de otro fabricando un acta', async () => {
+    const victima = await makeDeviceKey()
+    const atacante = await makeDeviceKey()
+    // El acta dice el perfil de la víctima; la sella el atacante, que se nombra sellador a
+    // sí mismo. La firma cuadra —la hizo él—, el permiso cuadra —se lo puso él— y aun así
+    // no vale: quien selló no es la llave que da nombre al perfil.
+    const falsa = await acta({
+      sellador: atacante,
+      miembros: [{ pub: atacante.publickey, caps: ['sign', 'sealer'] }]
+    })
+    falsa.profileId = victima.publickey
+    const refirmada = await acta({
+      sellador: atacante,
+      miembros: [{ pub: atacante.publickey, caps: ['sign', 'sealer'] }]
+    })
+    // Bien firmada de arriba abajo, solo que con el `profileId` de la víctima dentro.
+    const cuerpo = { ...refirmada, profileId: victima.publickey }
+    const { signature } = await signWithDevice({
+      privateJwk: atacante.privateJwk, publickey: atacante.publickey, data: actaBody(cuerpo)
+    })
+    const bienFirmada = { ...cuerpo, sig: signature }
+
+    expect(verifyActaMembership(falsa, atacante.publickey)).toBe(null)
+    expect(verifyActaMembership(bienFirmada, atacante.publickey)).toBe(null)
+    // Y para que quede claro que no es la firma lo que lo salva: con SU propio perfil sí.
+    expect(verifyActaMembership(refirmada, atacante.publickey)).toBe(atacante.publickey)
+  })
+
   it('quien la selló TIENE que poder sellar, o no vale', async () => {
     const master = await makeDeviceKey()
     const tel = await makeDeviceKey()

@@ -791,9 +791,27 @@ function verifyActaMembership(acta, deviceJwkStr) {
     if (sealer !== undefined && typeof sealer !== 'string') return null;
     if (typeof sig !== 'string' || !Array.isArray(members)) return null;
     if (!members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
-    // QUIEN SELLÓ TIENE QUE PODER SELLAR, según la propia acta. Sin esto bastaba con
-    // firmarla con cualquier llave y decir que es tuya: la firma cuadraba —la había hecho
-    // el que la presentaba— y el proxio ataba el `profileId` de otra persona.
+
+    // LA FIRMA TIENE QUE PROBAR EL `profileId`, NO SOLO EL ACTA.
+    //
+    // `profileId` es un CAMPO: quien fabrica un acta lo escribe como quiera. Si solo se
+    // comprueba «está firmada por quien dice y ese puede sellar», cualquiera se hace un
+    // acta con el `profileId` de OTRO, se nombra sellador a sí mismo, la firma con su
+    // llave — todo cuadra — y el proxio le ata el perfil de la víctima. Los mensajes
+    // dirigidos a esa persona acaban en su token.
+    //
+    // Lo que de verdad ata un acta a su perfil es la CADENA: el génesis se autofirma con la
+    // llave que da nombre al perfil, y cada acta la sella alguien que la anterior autorizó
+    // (el filtro doble de `applyChanges`). El proxio recibe UNA acta suelta y no puede
+    // recorrer eso, así que exige el único caso que se demuestra con lo que tiene delante:
+    // que la haya sellado la llave del propio perfil.
+    //
+    // Deja fuera al multivault (una segunda bóveda sellando la de otro), y es a propósito:
+    // atar mal el perfil de alguien es peor que no atarlo. Ese caso entra cuando se
+    // presente la cadena de eslabones, no antes.
+    if (sealedBy !== profileId) return null;
+    // Y además el acta tiene que decir que esa llave puede sellar (permiso menos renuncias):
+    // si el dueño se lo quitó, no vale ni siendo la del perfil.
     if (!puedeSellar(acta, sealedBy)) return null;
     let sealerJwk; try { sealerJwk = JSON.parse(sealedBy); } catch { return null; }
     // El cuerpo firmado es el acta SIN `sig` y SIN `card` — tiene que coincidir exactamente
