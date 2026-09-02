@@ -1687,7 +1687,12 @@ wss.on('connection', (ws, req) => {
     }));
     
     usageStats.recordConnection(clientIp);
-    if (process.env.NODE_ENV !== 'test') console.log(`Cliente conectado - Token: ${token}, IP: ${clientIp}. Total activos: ${activeConnections.size}`);
+    // SIN LA IP. La dirección se usa para frenar el abuso (`usageStats`, `rateLimiter`) y
+    // ahí caduca a los 30 días; escribirla ADEMÁS en el log la dejaba en un sitio donde su
+    // vida la decide la rotación de pm2 y no una política, y donde nadie la mira nunca.
+    // Para diagnosticar basta el token, que es efímero y no señala a una persona
+    // (dueño, 2026-09-02, al escribir el mapa de flujos de datos).
+    if (process.env.NODE_ENV !== 'test') console.log(`Cliente conectado - Token: ${token}. Total activos: ${activeConnections.size}`);
     
     // Manejar mensajes recibidos
     ws.on('message', (data) => {
