@@ -13,9 +13,9 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@dotrino/identity": "0.72.0",
+    "@dotrino/identity": "0.78.0",
     "@dotrino/proxy-client": "0.13.1",
-    "@dotrino/vault": "0.35.0",
+    "@dotrino/vault": "0.52.0",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.0.0",
     "web-push": "^3.6.7",
