@@ -9,6 +9,12 @@
  * Variables de entorno:
  *   USAGE_STATS_FILE      ruta del archivo JSON (default: usage-stats.json en cwd)
  *   USAGE_STATS_INTERVAL  ms entre flushes (default 60_000)
+ *   USAGE_STATS_RETENTION_DAYS  cuánto se guarda una IP sin volver a verse (default 30)
+ *
+ * RETENCIÓN, porque esto guarda DIRECCIONES IP. Contarlas para frenar el abuso es
+ * legítimo; guardarlas para siempre no lo es, y hasta el 2026-09-02 no se borraba
+ * ninguna: `perIp` solo crecía. Una IP que no vuelve a aparecer en 30 días se va, y el
+ * plazo se puede cambiar. Lo que queda entonces es lo agregado, que no señala a nadie.
  */
 
 const fs = require('node:fs');
@@ -16,6 +22,7 @@ const path = require('node:path');
 
 const DEFAULT_PATH = path.resolve(process.cwd(), 'usage-stats.json');
 const DEFAULT_INTERVAL_MS = 60_000;
+const DEFAULT_RETENTION_DAYS = 30;
 
 function createUsageStats(options = {}) {
   const filePath = options.filePath
@@ -25,6 +32,11 @@ function createUsageStats(options = {}) {
     options.intervalMs != null ? options.intervalMs
       : process.env.USAGE_STATS_INTERVAL != null ? process.env.USAGE_STATS_INTERVAL
       : DEFAULT_INTERVAL_MS, 10
+  );
+  const retentionDays = Number.parseInt(
+    options.retentionDays != null ? options.retentionDays
+      : process.env.USAGE_STATS_RETENTION_DAYS != null ? process.env.USAGE_STATS_RETENTION_DAYS
+      : DEFAULT_RETENTION_DAYS, 10
   );
 
   const startedAt = Date.now();
@@ -100,8 +112,24 @@ function createUsageStats(options = {}) {
     setTimeout(() => { flushPending = false; flush(); }, 1000);
   }
 
+  /**
+   * Se olvida a quien no ha vuelto. Va en el `flush` y no en un temporizador aparte
+   * porque así se aplica siempre que se escribe: no hay forma de que el archivo del
+   * disco tenga algo más viejo que el plazo.
+   */
+  function forgetOld(now) {
+    const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+    let forgotten = 0;
+    for (const [ip, s] of Object.entries(data.perIp)) {
+      if ((s.lastSeen || s.firstSeen || 0) < cutoff) { delete data.perIp[ip]; forgotten += 1; }
+    }
+    return forgotten;
+  }
+
   function flush() {
     data.lastFlushAt = Date.now();
+    data.retentionDays = retentionDays;
+    forgetOld(data.lastFlushAt);
     try {
       fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
     } catch (e) {
@@ -128,6 +156,7 @@ function createUsageStats(options = {}) {
   }
 
   return {
+    forgetOld,
     recordConnection,
     recordMessage,
     recordHardLimit,
