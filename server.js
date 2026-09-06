@@ -59,6 +59,28 @@ persist.init(DB_FILE);
 const OFFLINE_TTL_MS = 24 * 60 * 60 * 1000;          // 1 día
 const IDENTIFY_TS_TOLERANCE_MS = 5 * 60 * 1000;       // ±5 min
 
+/**
+ * PARA QUIÉN va este `identify`. Desde `@dotrino/proxy-client` 0.18 el sobre lleva `aud`
+ * con la URL del proxio al que se conecta, y aquí se comprueba contra `PROXY_AUDIENCE`.
+ *
+ * TODAVÍA NO SE RECHAZA, y esto es una MIGRACIÓN con condición de cierre escrita, no un
+ * repliegue indefinido: hay doce repos y varios daemons (bóvedas, agentes, nodos de
+ * contenido) que se identifican contra este proxio, y algunos corren en máquinas que no
+ * administra nadie de aquí. Rechazar de golpe es la forma exacta del apagón del 1-2 de
+ * septiembre: el que llama reintenta para siempre y el que atiende no dice nada.
+ *
+ * Así que primero se MIDE: cada identify sin destinatario se cuenta y se dice en el log,
+ * con la llave, para saber quién falta. Cuando el contador esté a cero un tiempo, se pone
+ * `PROXY_AUDIENCE_ENFORCE=1` y pasa a rechazarse — y entonces este bloque se queda con la
+ * comprobación y sin el contador.
+ *
+ * Fecha objetivo de cierre: **2026-10-01**. Si llega sin cerrarse, es que sobra el plazo,
+ * no que haga falta más.
+ */
+const PROXY_AUDIENCE = String(process.env.PROXY_AUDIENCE || '').trim().replace(/\/+$/, '') || null;
+const PROXY_AUDIENCE_ENFORCE = process.env.PROXY_AUDIENCE_ENFORCE === '1';
+const identifySinAudiencia = new Map();   // pubkey → cuántas veces (para saber a quién le falta)
+
 // --- Federación s2s (opcional): reenviar mensajes por pubkey a proxies peer. ---
 // Apagada si PROXY_PEERS está vacío → el proxy se comporta EXACTAMENTE como antes.
 //
@@ -1492,6 +1514,21 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ ok: true }));
         return;
     }
+    /**
+     * CUÁNTOS SE IDENTIFICAN TODAVÍA SIN DECIR PARA QUIÉN. Es el número que decide cuándo
+     * se puede exigir el destinatario (`PROXY_AUDIENCE_ENFORCE=1`): mientras no sea cero,
+     * exigirlo dejaría mudo a alguien. No lleva llaves ni datos de usuario, solo la cuenta.
+     */
+    if (req.url === '/audience-pending' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+        res.end(JSON.stringify({
+            audience: PROXY_AUDIENCE,
+            enforcing: PROXY_AUDIENCE_ENFORCE,
+            clientesSinAudiencia: identifySinAudiencia.size,
+            identifiesSinAudiencia: [...identifySinAudiencia.values()].reduce((a, b) => a + b, 0)
+        }));
+        return;
+    }
     // Anuncio autofirmado de este nodo: quién soy (pubkey) y qué prefijo uso.
     // Es lo que un peer baja para pinearme. Público y sin datos de usuario.
     if (req.url === '/node' && req.method === 'GET') {
@@ -2308,6 +2345,25 @@ wss.on('connection', (ws, req) => {
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
                 return;
+            }
+            // ¿VIENE DIRIGIDO A MÍ? (ver PROXY_AUDIENCE, arriba). Mientras dure la migración
+            // se cuenta y se dice; con `PROXY_AUDIENCE_ENFORCE=1` se rechaza.
+            const audOk = PROXY_AUDIENCE && typeof data.aud === 'string' &&
+                data.aud.replace(/\/+$/, '') === PROXY_AUDIENCE;
+            if (!audOk) {
+                if (PROXY_AUDIENCE_ENFORCE) {
+                    const errorResponse = { type: 'error', error: 'identify sin destinatario o dirigido a otro proxio' };
+                    applyMessageIds(errorResponse, message);
+                    ws.send(JSON.stringify(errorResponse));
+                    return;
+                }
+                const n = (identifySinAudiencia.get(data.publickey) || 0) + 1;
+                identifySinAudiencia.set(data.publickey, n);
+                // Una línea por llave, no una por identify: reconectar es normal y no hace
+                // falta repetirlo. Lo que se quiere saber es QUIÉN falta por actualizar.
+                if (n === 1) {
+                    console.warn(`[proxy] identify sin destinatario (aud) de ${String(data.publickey).slice(0, 60)}… — cliente por actualizar a @dotrino/proxy-client >= 0.18`);
+                }
             }
             let pubKeyJwk;
             try { pubKeyJwk = JSON.parse(data.publickey); }
