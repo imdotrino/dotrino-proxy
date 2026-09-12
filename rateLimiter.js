@@ -28,6 +28,11 @@ const DEFAULT_LIMITS = {
   // Emisión de credenciales TURN: pocas por conexión (además hay cuota
   // por pubkey/hora dentro de turnCredentials.js). Env: RATE_LIMIT_TURN-CREDENTIALS_*
   'turn-credentials': { burst: 10, ratePerSec: 0.5 },
+  // Directorio de llaves de cifrado. Anunciar es una vez por conexión; preguntar es
+  // frecuente al entrar en una sala (uno por miembro) y luego casi nunca, porque el
+  // cliente lo cachea. Env: RATE_LIMIT_ENCPUB_* / RATE_LIMIT_ENC-LOOKUP_*
+  encpub:         { burst: 10,  ratePerSec: 1 },
+  'enc-lookup':   { burst: 60,  ratePerSec: 10 },
   __global__:     { burst: 300, ratePerSec: 120 }
 };
 

@@ -246,7 +246,7 @@ class MeshLink {
 /** La malla completa: enlaces salientes + atención de los entrantes. */
 class Mesh {
     constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onPeerGone,
-                  onPairRedeem, onPairResult, onChanOp, onChanResult, onChanEvent,
+                  onPairRedeem, onPairResult, onChanOp, onChanResult, onChanEvent, onEncPub,
                   log = console.log } = {}) {
         this.identity = identity;
         this.registry = registry;
@@ -258,6 +258,7 @@ class Mesh {
         this.onChanOp = onChanOp || (() => {});
         this.onChanResult = onChanResult || (() => {});
         this.onChanEvent = onChanEvent || (() => {});
+        this.onEncPub = onEncPub || (() => {});
         this.log = log;
         this.links = new Map();     // url -> MeshLink
         this.inbound = new Map();   // pubkey del peer -> ws entrante
@@ -346,6 +347,27 @@ class Mesh {
         else if (frame.op === 'chan-op') this.onChanOp(frame.payload, link);
         else if (frame.op === 'chan-result') this.onChanResult(frame.payload, link);
         else if (frame.op === 'chan-event') this.onChanEvent(frame.payload, link);
+        else if (frame.op === 'encpub') this.onEncPub(frame.payload, link);
+    }
+
+    /**
+     * Reparte un anuncio de llave de cifrado por toda la malla.
+     *
+     * Va a TODOS y no al nodo «dueño» porque no hay dueño: una identidad puede
+     * identificarse hoy aquí y mañana en el otro nodo, y quien pregunta por su llave puede
+     * estar en cualquiera de los dos. Repartirlo no pide confianza entre nodos — el
+     * anuncio va firmado por su dueño y el que lo recibe lo verifica igual que un cliente.
+     *
+     * Retenido (`retain:true`) a propósito: con el enlace caído se guarda y sale al
+     * volver. Es un dato duradero, no una entrega que caduque con las conexiones.
+     */
+    broadcastEncPub(payload) {
+        let live = 0;
+        for (const l of this.links.values()) {
+            l.send('encpub', payload);
+            if (l.ready) live++;
+        }
+        return live;
     }
 
     /** Enlace SALIENTE hacia el nodo con esa pubkey (o null). */

@@ -17,10 +17,23 @@ Al conectarse, el servidor responde con:
 ```json
 {
   "type": "connected",
-  "token": "ABCD",
+  "instance": "<id de esta conexión>",
+  "token": "<el mismo valor: nombre histórico>",
+  "node": "<id de este nodo>",
+  "peers": ["<ids de los nodos que conoce>"],
+  "protocol": 2,
+  "speaks": [1, 2],
+  "caps": ["channels", "pubkey-routing", "offline-queue", "pairing-codes", "push", "turn", "encpub"],
   "timestamp": "2026-03-01T04:33:38.141Z"
 }
 ```
+
+`protocol`, `speaks` y `caps` existen para que una incompatibilidad **se vea** en vez de
+manifestarse como silencio (CONVENCIONES §14): un cliente que necesita algo que este
+proxio no tiene lo dice al instante, en lugar de reintentar contra alguien que no le
+entiende. `protocol` sube **solo cuando cambia el cable**; `speaks` dice qué versiones
+además se entienden — el 2 añade el directorio de llaves de cifrado y sigue hablando el
+1 entero, así que un cliente anterior no nota nada.
 
 ## Identificadores: instancia y cita
 
@@ -470,6 +483,57 @@ conexión; la credencial expira sola (`TURN_TTL_SECONDS`, default 600 s).
 **Respuesta (proxy sin TURN):** `{ "type": "turn-credentials", "enabled": false }`.
 **Errores:** sin `identify` previo, firma inválida, o `retry_after_ms` si se
 alcanzó la cuota por hora.
+
+### Directorio de llaves de cifrado (`encpub` / `enc-lookup`)
+
+Sellar un mensaje dirigido necesita la llave de **cifrado** del destinatario. Este
+directorio es de dónde se saca cuando las dos puntas no se emparejaron nunca.
+
+**El proxio es un BUZÓN, no una autoridad.** Guarda el anuncio firmado tal cual y lo
+devuelve entero; quien pregunta verifica la firma contra la pubkey a la que va a
+escribir. Si este servidor cambiara la llave por otra para poder leer, el cliente lo
+nota y no manda nada — ni sellado ni en claro.
+
+**Anunciar la propia** (requiere `identify` previo con esa misma pubkey en esta
+conexión: anunciar es para uno mismo):
+```json
+{
+  "type": "encpub",
+  "data": {
+    "v": 1, "op": "encpub", "aud": "dotrino:encpub",
+    "publickey": "<JWK string de firma>",
+    "encpub": "<JWK string de cifrado, ECDH P-256>",
+    "ts": 1750000000000
+  },
+  "signature": "<base64 ECDSA P-256 ieee-p1363 del JSON canónico de data>",
+  "id": "req_1"
+}
+```
+**Respuesta:** `{ "type": "encpub-announced", "publickey": "…", "stored": true, "id": "req_1" }`.
+`stored: false` significa que ya había un anuncio **más nuevo**: el `ts` va dentro de lo
+firmado y nunca se retrocede, así que nadie puede devolver a otro a una llave vieja
+reenviando un anuncio capturado.
+
+Un anuncio aceptado se reparte por la malla a los demás nodos. No pide confianza entre
+nodos: cada uno lo verifica igual que un cliente.
+
+**Preguntar por la de otro** (no requiere `identify`; una llave pública es pública):
+```json
+{ "type": "enc-lookup", "publickeys": ["<JWK string>", "…"], "id": "req_2" }
+```
+**Respuesta:**
+```json
+{
+  "type": "enc-lookup",
+  "keys": [{ "data": { "…": "el cuerpo firmado" }, "signature": "…" }],
+  "missing": ["<las que nadie ha anunciado>"],
+  "id": "req_2"
+}
+```
+Lo que no hay se dice en `missing` y no se calla: quien pregunta tiene que poder
+distinguir «no la tiene nadie» de «se cayó la red», que se arreglan de formas distintas.
+Máximo 32 llaves por consulta (`PROXY_MAX_ENCPUB_LOOKUP`); los anuncios caducan a los 90
+días sin refrescarse (`PROXY_ENCPUB_TTL_MS`).
 
 ### Errores
 ```json

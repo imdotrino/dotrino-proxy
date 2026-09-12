@@ -57,6 +57,19 @@ function init(dbFile) {
             pubkey     TEXT PRIMARY KEY,
             updated_at INTEGER NOT NULL
         );
+        -- Directorio de llaves de CIFRADO: el anuncio firmado con el que una identidad
+        -- dice «se me sella a esta llave». Se guarda el sobre ENTERO (data + signature)
+        -- porque el que pregunta verifica la firma él mismo: si guardáramos solo la
+        -- llave, este servidor pasaría de buzón a autoridad y podría cambiarla por la
+        -- suya sin que nadie lo notara. Persistente a propósito: el destinatario de un
+        -- mensaje encolado 24 h está, por definición, desconectado.
+        CREATE TABLE IF NOT EXISTS enc_pubkeys (
+            pubkey     TEXT PRIMARY KEY,
+            data       TEXT NOT NULL,
+            signature  TEXT NOT NULL,
+            ts         INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
     `);
 
     // `peer_nodes` va APARTE del bloque de arriba, y el índice DESPUÉS de la
@@ -103,6 +116,32 @@ function loadHomes(minUpdatedAt) {
 
 function deleteExpiredHomes(cutoff) {
     db.prepare('DELETE FROM home_registrations WHERE updated_at < ?').run(cutoff);
+}
+
+// ----- directorio de llaves de cifrado -----------------------------------
+
+/**
+ * Guarda el anuncio, pero SOLO si es más nuevo que el que había. El `ts` lo pone quien
+ * firma y va dentro de lo firmado, así que un tercero no puede retroceder la llave de
+ * nadie reenviando un anuncio viejo por la malla.
+ */
+function upsertEncPub(pubkey, data, signature, ts, now) {
+    db.prepare(`
+        INSERT INTO enc_pubkeys (pubkey, data, signature, ts, updated_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(pubkey) DO UPDATE SET
+            data = excluded.data, signature = excluded.signature,
+            ts = excluded.ts, updated_at = excluded.updated_at
+        WHERE excluded.ts > enc_pubkeys.ts
+    `).run(pubkey, data, signature, ts, now);
+}
+
+function loadEncPubs(minUpdatedAt) {
+    return db.prepare('SELECT pubkey, data, signature, ts FROM enc_pubkeys WHERE updated_at >= ?')
+        .all(minUpdatedAt);
+}
+
+function deleteExpiredEncPubs(cutoff) {
+    db.prepare('DELETE FROM enc_pubkeys WHERE updated_at < ?').run(cutoff);
 }
 
 // ----- meta (clave-valor para config persistida, p.ej. VAPID) ------------
@@ -281,4 +320,7 @@ module.exports = {
     upsertHome,
     loadHomes,
     deleteExpiredHomes,
+    upsertEncPub,
+    loadEncPubs,
+    deleteExpiredEncPubs,
 };

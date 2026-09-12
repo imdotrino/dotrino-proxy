@@ -169,6 +169,14 @@ const mesh = new Mesh({
             try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
         } catch (e) { console.warn('[mesh] chan-result falló:', e.message); }
     },
+    // Un peer nos reparte un anuncio de llave de cifrado. Se verifica igual que si
+    // viniera de un cliente: la malla no da confianza, la firma sí.
+    onEncPub: (payload) => {
+        try {
+            const { data, signature } = payload || {};
+            storeEncPub(data, signature);
+        } catch (e) { console.warn('[mesh] encpub falló:', e.message); }
+    },
     // El nodo dueño nos manda un evento de canal para una conexión nuestra.
     onChanEvent: (payload) => {
         try { deliverChannelEvent(payload); }
@@ -513,6 +521,73 @@ function sendChannelFrameTo(instance, frame) {
     if (!owner) return false;
     return mesh.sendTo(owner.pubkey, 'chan-event', { toInstance: instance, frame }, { retain: false });
 }
+// ----- directorio de llaves de CIFRADO ------------------------------------
+//
+// ESTE SERVIDOR ES UN BUZÓN, NO UNA AUTORIDAD. Guarda el anuncio firmado con el que una
+// identidad dice «se me sella a esta llave» y se lo da a quien pregunte, entero: quien
+// pregunta verifica la firma contra la pubkey a la que va a escribir. Si aquí se
+// cambiara la llave por otra, el cliente lo nota y no manda nada — ni sellado ni en
+// claro. Por eso se guarda el sobre completo y nunca solo la llave.
+//
+// Persistente a propósito: el destinatario de un mensaje encolado 24 h está, por
+// definición, desconectado, y sin esto no se le podría sellar justo cuando más falta
+// hace.
+const ENCPUB_TTL_MS = Number(process.env.PROXY_ENCPUB_TTL_MS || 90 * 24 * 60 * 60 * 1000); // 90 días
+const ENCPUB_AUD = 'dotrino:encpub';
+// Tope de una consulta. Una sala pregunta por varios de golpe; nadie necesita barrer.
+const MAX_ENCPUB_LOOKUP = Number(process.env.PROXY_MAX_ENCPUB_LOOKUP || 32);
+// Tolerancia del `ts` del anuncio: el mismo criterio que `identify` (±5 min) pero solo
+// por arriba. Un anuncio VIEJO es legítimo — el nodo que arranca rehidrata los suyos y
+// la malla reparte los de los demás —; uno del futuro no.
+const ENCPUB_FUTURE_TOLERANCE_MS = IDENTIFY_TS_TOLERANCE_MS;
+
+/** pubkey -> { data, signature, ts }. Working set en RAM sobre la tabla. */
+const encPubs = new Map();
+
+/**
+ * ¿Es un anuncio válido, y lo firmó quien dice? Misma verificación que hace el cliente,
+ * porque un anuncio entra por dos puertas: un cliente suyo o un peer de la malla.
+ */
+function verifyEncPubStatement(data, signature) {
+    if (!data || typeof signature !== 'string') return false;
+    if (data.v !== 1 || data.op !== 'encpub' || data.aud !== ENCPUB_AUD) return false;
+    if (typeof data.publickey !== 'string' || !data.publickey) return false;
+    if (!Number.isFinite(data.ts) || data.ts > Date.now() + ENCPUB_FUTURE_TOLERANCE_MS) return false;
+    if (typeof data.encpub !== 'string' || !data.encpub) return false;
+    let encJwk;
+    try { encJwk = JSON.parse(data.encpub); } catch (_) { return false; }
+    // Se comprueba la FORMA de la llave anunciada: una llave rota no falla al guardarla,
+    // falla mucho después y del lado del que intenta sellar.
+    if (encJwk.kty !== 'EC' || encJwk.crv !== 'P-256' ||
+        typeof encJwk.x !== 'string' || typeof encJwk.y !== 'string') return false;
+    let pubJwk;
+    try { pubJwk = JSON.parse(data.publickey); } catch (_) { return false; }
+    return verifySignatureWithJWK(data, signature, pubJwk);
+}
+
+/**
+ * Guarda un anuncio si es válido y más nuevo que el que había.
+ * @returns {boolean} si quedó guardado (sirve para no reenviar por la malla lo repetido)
+ */
+function storeEncPub(data, signature) {
+    if (!verifyEncPubStatement(data, signature)) return false;
+    const previo = encPubs.get(data.publickey);
+    // NUNCA HACIA ATRÁS: sin esto, reenviar un anuncio viejo devolvería a alguien a una
+    // llave que ya no usa, y sus mensajes se volverían ilegibles sin que nadie tocara nada.
+    if (previo && previo.ts >= data.ts) return false;
+    encPubs.set(data.publickey, { data, signature, ts: data.ts });
+    try { persist.upsertEncPub(data.publickey, JSON.stringify(data), signature, data.ts, Date.now()); }
+    catch (e) { console.warn('[encpub] could not persist announcement:', e.message); }
+    return true;
+}
+
+for (const fila of persist.loadEncPubs(Date.now() - ENCPUB_TTL_MS)) {
+    try {
+        const data = JSON.parse(fila.data);
+        encPubs.set(fila.pubkey, { data, signature: fila.signature, ts: fila.ts });
+    } catch (_) { /* fila ilegible: se regenera con el próximo anuncio */ }
+}
+
 // "Soy el home de estas pubkeys" (identificaron acá). Set en RAM + respaldo SQLite.
 const homePubkeys = new Set(persist.loadHomes(Date.now() - HOME_TTL_MS));
 function registerHome(pubkey) {
@@ -1720,6 +1795,18 @@ wss.on('connection', (ws, req) => {
         // pregunta en cada nodo y mezcla, sin que haya un nodo árbitro.
         // No filtra nada: los ids son públicos (van en cada instancia y en /peers).
         peers: peerRegistry.known().map((p) => p.nodeId),
+        // QUÉ SABE HACER ESTE PROXIO, dicho de entrada (CONVENCIONES §14). Una
+        // incompatibilidad de versiones se manifiesta como SILENCIO: el que llama
+        // reintenta para siempre y el que atiende no sabe que le hablan. Con esto, un
+        // cliente que necesita `enc-lookup` contra un proxio que no lo tiene lo dice al
+        // instante y con su propio error, en vez de comerse el timeout.
+        //
+        // `protocol` es un entero y sube SOLO cuando cambia el cable; `speaks` dice lo
+        // que además se entiende. 2 es el cable con el directorio de llaves de cifrado;
+        // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
+        protocol: 2,
+        speaks: [1, 2],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'turn', 'encpub'],
         timestamp: new Date().toISOString()
     }));
     
@@ -1840,6 +1927,12 @@ wss.on('connection', (ws, req) => {
                 return;
             } else if (message.type === 'pair-redeem') {
                 handlePairRedeemMessage(ws, message);
+                return;
+            } else if (message.type === 'encpub') {
+                handleEncPubMessage(ws, message);
+                return;
+            } else if (message.type === 'enc-lookup') {
+                handleEncLookupMessage(ws, message);
                 return;
             }
             
@@ -2319,6 +2412,103 @@ wss.on('connection', (ws, req) => {
     }
     
     // ----- identify y direccionamiento por pubkey -----------------------
+
+    /**
+     * ANUNCIAR LA LLAVE DE CIFRADO DE ESTA IDENTIDAD.
+     *
+     * Dos condiciones, y las dos hacen falta:
+     *   1. el anuncio va firmado por la pubkey de la que habla (eso lo ata a la identidad);
+     *   2. esta conexión YA se identificó como esa pubkey.
+     *
+     * La segunda no añade seguridad criptográfica —la firma ya lo dice todo— pero sí
+     * impide que un desconocido llene el directorio de anuncios de terceros que capturó
+     * por ahí. Anunciar es para uno mismo.
+     */
+    function handleEncPubMessage(ws, message) {
+        try {
+            const data = message.data;
+            const sig = message.signature;
+            const mia = tokenToPubkey.get(ws.token);
+            if (!mia) {
+                const e = { type: 'error', error: 'encpub: identificate primero (identify)' };
+                applyMessageIds(e, message);
+                ws.send(JSON.stringify(e));
+                return;
+            }
+            if (!data || data.publickey !== mia) {
+                const e = { type: 'error', error: 'encpub: el anuncio no es de la identidad de esta conexión' };
+                applyMessageIds(e, message);
+                ws.send(JSON.stringify(e));
+                return;
+            }
+            if (!verifyEncPubStatement(data, sig)) {
+                const e = { type: 'error', error: 'encpub: anuncio inválido o mal firmado' };
+                applyMessageIds(e, message);
+                ws.send(JSON.stringify(e));
+                return;
+            }
+            const guardado = storeEncPub(data, sig);
+            // Se reparte SOLO lo que cambió: reenviar lo repetido haría que dos nodos se
+            // devolvieran el mismo anuncio para siempre.
+            if (guardado) {
+                try { mesh.broadcastEncPub({ data, signature: sig }); }
+                catch (e) { console.warn('[encpub] mesh broadcast failed:', e.message); }
+            }
+            const response = { type: 'encpub-announced', publickey: data.publickey, stored: guardado };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+        } catch (e) {
+            console.error('handleEncPubMessage error:', e);
+            try {
+                const err = { type: 'error', error: 'Error interno en encpub' };
+                applyMessageIds(err, message);
+                ws.send(JSON.stringify(err));
+            } catch (_) {}
+        }
+    }
+
+    /**
+     * PREGUNTAR POR LA LLAVE DE CIFRADO DE OTRO. Se devuelve el anuncio TAL CUAL lo firmó
+     * su dueño; el que pregunta lo verifica. Lo que no hay se dice en `missing`, para que
+     * quien llama distinga «no la tiene nadie» de «se cayó la red» — son problemas
+     * distintos: uno se arregla cuando el otro actualice, el otro esperando.
+     */
+    function handleEncLookupMessage(ws, message) {
+        try {
+            const pedidas = Array.isArray(message.publickeys)
+                ? message.publickeys
+                : (typeof message.publickeys === 'string' ? [message.publickeys] : null);
+            if (!pedidas || pedidas.length === 0) {
+                const e = { type: 'error', error: 'enc-lookup: falta publickeys' };
+                applyMessageIds(e, message);
+                ws.send(JSON.stringify(e));
+                return;
+            }
+            if (pedidas.length > MAX_ENCPUB_LOOKUP) {
+                const e = { type: 'error', error: `enc-lookup: demasiadas llaves (${pedidas.length}); el máximo es ${MAX_ENCPUB_LOOKUP}` };
+                applyMessageIds(e, message);
+                ws.send(JSON.stringify(e));
+                return;
+            }
+            const keys = [];
+            const missing = [];
+            for (const pk of pedidas) {
+                const entrada = typeof pk === 'string' ? encPubs.get(pk) : null;
+                if (entrada) keys.push({ data: entrada.data, signature: entrada.signature });
+                else missing.push(pk);
+            }
+            const response = { type: 'enc-lookup', keys, missing, timestamp: new Date().toISOString() };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+        } catch (e) {
+            console.error('handleEncLookupMessage error:', e);
+            try {
+                const err = { type: 'error', error: 'Error interno en enc-lookup' };
+                applyMessageIds(err, message);
+                ws.send(JSON.stringify(err));
+            } catch (_) {}
+        }
+    }
 
     function handleIdentifyMessage(ws, message) {
         try {
@@ -2995,6 +3185,15 @@ async function start(port = Number(PORT)) {
                 homePubkeys.clear();
                 for (const pk of persist.loadHomes(cutoff)) homePubkeys.add(pk);
             } catch (e) { console.warn('[fed] purga de homes falló:', e.message); }
+            try {
+                const cutoffEnc = Date.now() - ENCPUB_TTL_MS;
+                persist.deleteExpiredEncPubs(cutoffEnc);
+                encPubs.clear();
+                for (const fila of persist.loadEncPubs(cutoffEnc)) {
+                    try { encPubs.set(fila.pubkey, { data: JSON.parse(fila.data), signature: fila.signature, ts: fila.ts }); }
+                    catch (_) {}
+                }
+            } catch (e) { console.warn('[encpub] purga falló:', e.message); }
         }, 60 * 60 * 1000).unref();
         startFederation();
 
