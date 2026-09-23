@@ -126,9 +126,9 @@ const mesh = new Mesh({
     log: (...a) => console.log(...a),
     onDeliver: (payload) => {
         try {
-            const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral } = payload || {};
+            const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet } = payload || {};
             if (typeof toPubkey !== 'string' || message === undefined) return;
-            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true);
+            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true);
         } catch (e) { console.warn('[mesh] entrega federada falló:', e.message); }
     },
     // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
@@ -602,7 +602,7 @@ function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(p
 // El sobre va FIRMADO con la llave de este nodo: el receptor sabe quién se lo
 // mandó sin que haya ningún secreto compartido de por medio. `ts` + `nonce`
 // cierran el replay (una trama capturada no se puede reenviar indefinidamente).
-function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false) {
+function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false) {
     if (!PROXY_PEERS.length) return;
     if (!nodeIdentity) return;  // sin identidad no se puede firmar → no se federa
 
@@ -618,7 +618,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
     if (mesh.hasLinks()) {
         // Un efímero NO se guarda para reenviar: si el enlace está caído, para
         // cuando vuelva ya no sirve. Se intenta ahora o no se intenta.
-        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral }, { retain: !ephemeral });
+        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet }, { retain: !ephemeral });
         return;
     }
 
@@ -628,7 +628,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
         from: nodeIdentity.pubkey,
         ts: Date.now(),
         nonce: nodeIdentityLib.newNonce(),
-        toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral
+        toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet
     };
     const payload = JSON.stringify({ body, signature: nodeIdentityLib.signBody(nodeIdentity, body) });
     for (const peer of PROXY_PEERS) {
@@ -644,7 +644,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
 
 // Aplica un mensaje federado recibido de un peer: entrega a instancias locales,
 // o encola SÓLO si este proxy es el home del destinatario. NO re-reenvía (sin loops).
-function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false) {
+function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false) {
     const set = pubkeyToTokens.get(toPubkey);
     let delivered = 0;
     if (set) {
@@ -667,7 +667,7 @@ function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ep
             queuedAt: queuedAt || Date.now(),
             expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes
         });
-        ringPush(toPubkey);
+        if (!quiet) ringPush(toPubkey);
         return { queued: true };
     }
     return { dropped: true };
@@ -1649,9 +1649,9 @@ const server = http.createServer((req, res) => {
                 const check = verifyPeerEnvelope(envelope);
                 if (!check.ok) { res.writeHead(401, { 'content-type': 'application/json' });
                     res.end(JSON.stringify({ error: check.reason })); return; }
-                const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral } = check.body;
+                const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet } = check.body;
                 if (typeof toPubkey !== 'string' || message === undefined) { res.writeHead(400); res.end(); return; }
-                const r = deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true);
+                const r = deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true);
                 res.writeHead(200, { 'content-type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, ...r }));
             } catch (_) { res.writeHead(400); res.end(); }
@@ -2996,6 +2996,11 @@ wss.on('connection', (ws, req) => {
         // fuera de contexto. Lo marca quien envía, que es el único que sabe si su
         // payload caduca.
         const ephemeral = message.ephemeral === true;
+        // Mensaje CALLADO: se encola igual, pero no se toca el timbre push. Lo marca quien
+        // envía para lo que puede esperar a que la otra punta abra sola (un aviso de que
+        // algo cambió). Sin esto, cada aviso de la bóveda hacía sonar el teléfono con
+        // «alguien pide tus claves», y al abrir no había ningún pedido.
+        const quiet = message.quiet === true;
         const expiresAt = now + OFFLINE_TTL_MS;
         const sentInline = [];
         const queued = [];
@@ -3040,7 +3045,7 @@ wss.on('connection', (ws, req) => {
                 // el home aún no se conoce (la app dedup por `mid`). El receptor
                 // federado, en cambio, solo encola si es home (evita acumular en
                 // proxies intermedios).
-                forwardToPeers(pk, message.message, senderPubkey, now, expiresAt, ephemeral);
+                forwardToPeers(pk, message.message, senderPubkey, now, expiresAt, ephemeral, quiet);
                 if (ephemeral) {
                     // Se intenta la entrega en vivo por la malla, pero no se guarda
                     // nada: si el destinatario no está, se perdió y punto.
@@ -3048,7 +3053,7 @@ wss.on('connection', (ws, req) => {
                 } else {
                     const bytes = bytesOfMessage(message.message);
                     enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes });
-                    ringPush(pk);
+                    if (!quiet) ringPush(pk);
                     queued.push(pk);
                 }
             } else if (ephemeral) {
@@ -3068,7 +3073,7 @@ wss.on('connection', (ws, req) => {
                 queued.push(pk);
                 // Timbre push (sin contenido): despierta al SW del destinatario
                 // para que reconecte y baje su cola. Best-effort.
-                ringPush(pk);
+                if (!quiet) ringPush(pk);
             }
         }
         if (queued.length || failed.length || dropped.length) {
