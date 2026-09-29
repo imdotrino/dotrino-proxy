@@ -931,6 +931,7 @@ function verifyActaMembership(acta, deviceJwkStr) {
 // servidor necesita para poder timbrar. Persiste en SQLite (ver persistence.js).
 const webpush = require('web-push');
 const { ringFcm, fcmEnabled } = require('./fcm');
+const { ringApns, apnsEnabled, parseApnsSubscription } = require('./apns');
 
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@dotrino.com';
 
@@ -965,6 +966,7 @@ if (pushEnabled) {
     webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
     console.log(`[push] Web Push habilitado (VAPID ${_vapid.source}).`);
     console.log(fcmEnabled() ? '[push] FCM enabled (service account from FCM_SERVICE_ACCOUNT_B64).' : '[push] FCM off: no FCM_SERVICE_ACCOUNT_B64 (native app will not be rung).');
+    console.log(apnsEnabled() ? '[push] APNs enabled (APNS_KEY_B64/APNS_KEY_ID/APNS_TEAM_ID).' : '[push] APNs off: no APNS_KEY_B64/APNS_KEY_ID/APNS_TEAM_ID (iOS apps will not be rung).');
 } else {
     console.warn('[push] VAPID no disponible: el timbre push queda deshabilitado (la cola offline sigue funcionando).');
 }
@@ -997,6 +999,13 @@ function ringPush(pubkey, extra) {
             if (r.gone) { removePushSubscription(pubkey); console.log('[push] fcm token gone: subscription removed'); }
             else if (!r.ok && !r.disabled) console.error('[push] fcm error:', r.status, r.body);
         }).catch((e) => console.error('[push] fcm error:', e.message));
+        return;
+    }
+    if (sub.kind === 'apns') {
+        ringApns(sub, ring).then((r) => {
+            if (r.gone) { removePushSubscription(pubkey); console.log('[push] apns token gone: subscription removed'); }
+            else if (!r.ok && !r.disabled) console.error('[push] apns error:', r.status, r.body);
+        }).catch((e) => console.error('[push] apns error:', e.message));
         return;
     }
     if (!pushEnabled) return;
@@ -2672,14 +2681,17 @@ wss.on('connection', (ws, req) => {
                 }
             }
             // Dos formas: la PushSubscription del navegador (endpoint + keys) o el token de
-            // la app nativa (`{ kind:'fcm', token }`). Cualquier otra cosa no es una suscripción.
+            // la app nativa (`{ kind:'fcm', token }` en Android, `{ kind:'apns', token, topic, env }`
+            // en iOS). Cualquier otra cosa no es una suscripción.
             const isWeb = subscription && typeof subscription.endpoint === 'string';
             const isFcm = subscription && subscription.kind === 'fcm' && typeof subscription.token === 'string' && subscription.token.length > 20 && subscription.token.length < 4096;
-            if (!isWeb && !isFcm) {
-                const e = { type: 'error', error: 'push-subscribe.subscription: expected a PushSubscription or { kind:"fcm", token }' };
+            const apns = parseApnsSubscription(subscription);
+            if (!isWeb && !isFcm && !apns) {
+                const e = { type: 'error', error: 'push-subscribe.subscription: expected a PushSubscription, { kind:"fcm", token } or { kind:"apns", token, topic, env }' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             if (isFcm) subscription = { kind: 'fcm', token: subscription.token };
+            if (apns) subscription = apns;
             setPushSubscription(data.publickey, subscription);
             const response = { type: 'push-subscribed', publickey: data.publickey };
             applyMessageIds(response, message);
