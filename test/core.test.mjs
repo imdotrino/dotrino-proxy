@@ -119,11 +119,11 @@ describe('core: connection & messaging', () => {
 
             a.send({ message: 'sin to' });
             const err1 = await a.waitFor((m) => m.type === 'error', { fromNow: true });
-            expect(err1.error).toMatch(/formato de mensaje inválido/i);
+            expect(err1.code).toBe('bad-message');
 
             a.send({ to: 'AAAA' });
             const err2 = await a.waitFor((m) => m.type === 'error', { fromNow: true });
-            expect(err2.error).toMatch(/formato de mensaje inválido/i);
+            expect(err2.code).toBe('bad-message');
         });
 
         it('rechaza array "to" vacío', async () => {

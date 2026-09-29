@@ -21,7 +21,7 @@ describe('citas de emparejamiento (unidad)', () => {
     it('canjea una vez y solo una (se quema al usarse)', () => {
         const { code } = codes.create({ instance: 'K7abc', pubkey: 'pk', hint: 'K7' });
         expect(codes.redeem(code)).toMatchObject({ instance: 'K7abc', pubkey: 'pk' });
-        expect(codes.redeem(code).error).toMatch(/no válido o ya usado/);
+        expect(codes.redeem(code).code).toBe('invalid-code');
     });
 
     it('acepta el código tecleado en minúsculas, con espacios y guiones', () => {
@@ -35,7 +35,7 @@ describe('citas de emparejamiento (unidad)', () => {
         const { code } = codes.create({ instance: 'K7abc', hint: 'K7', ttlMs: 30 * 1000 });
         const entry = codes.codes.get(code);
         entry.expiresAt = Date.now() - 1;
-        expect(codes.redeem(code).error).toMatch(/caducado/);
+        expect(codes.redeem(code).code).toBe('expired-code');
     });
 
     it('una cita viva por conexión: pedir otra invalida la anterior', () => {
@@ -142,7 +142,7 @@ describe('citas entre nodos', () => {
         cb.send({ type: 'pair-redeem', code: ajeno + '1234', id: 'unk' });
         const res = await cb.waitFor((m) => m.type === 'pair-redeem', 10000);
         expect(res.ok).toBe(false);
-        expect(res.error).toMatch(/ningún nodo conocido|no válido/i);
+        expect(['unknown-code-node', 'invalid-code']).toContain(res.code);
         await cb.close();
     }, 20000);
 

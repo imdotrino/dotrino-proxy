@@ -105,7 +105,7 @@ describe('turn-credentials (op firmada)', () => {
         const data = { op: 'turn-credentials', publickey: id.publickey, ts: Date.now() };
         client.send({ type: 'turn-credentials', data, signature: 'AAAA'.repeat(24), id: 'bad1' });
         const res = await client.waitFor((m) => m.type === 'error' && m.id === 'bad1');
-        expect(res.error).toMatch(/Firma/);
+        expect(res.code).toBe('bad-signature');
         await client.close();
     });
 

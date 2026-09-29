@@ -142,7 +142,7 @@ describe('canales con nodo dueño', () => {
         cb.send({ type: 'list', channel: sign('YYYYYYYYYYYY/sala-fantasma'), id: 'zz' });
         const res = await cb.waitFor((m) => m.type === 'error' || m.type === 'channel_list', 10000);
         expect(res.type).toBe('error');
-        expect(res.error).toMatch(/nodo desconocido/i);
+        expect(res.code).toBe('unknown-node');
         await cb.close();
     }, 20000);
 });

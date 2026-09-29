@@ -85,7 +85,7 @@ describe('channels: publish / unpublish / list / channel_count', () => {
                 }
             });
             const err = await a.waitFor((m) => m.type === 'error');
-            expect(err.error).toMatch(/firma inválida/i);
+            expect(err.code).toBe('bad-signature');
         });
     });
 

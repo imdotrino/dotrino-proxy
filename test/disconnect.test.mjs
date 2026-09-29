@@ -61,7 +61,7 @@ describe('manual disconnect message', () => {
         const a = await connect();
         a.send({ type: 'disconnect', target: 'ZZZZ' });
         const err = await a.waitFor((m) => m.type === 'error');
-        expect(err.error).toMatch(/no encontrado/i);
+        expect(err.code).toBe('unknown-token');
     });
 
     it('rechaza si los tokens no están pareados', async () => {
@@ -69,7 +69,7 @@ describe('manual disconnect message', () => {
         const b = await connect();
         a.send({ type: 'disconnect', target: b.token });
         const err = await a.waitFor((m) => m.type === 'error');
-        expect(err.error).toMatch(/no están pareados/i);
+        expect(err.code).toBe('not-paired');
     });
 
     it('rechaza target faltante o no-string', async () => {

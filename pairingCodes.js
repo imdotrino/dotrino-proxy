@@ -105,13 +105,13 @@ class PairingCodes {
      */
     redeem(rawCode) {
         const code = normalizeCode(rawCode);
-        if (!code) return { error: 'código vacío' };
+        if (!code) return { code: 'empty-code', error: 'empty code' };
         const entry = this.codes.get(code);
-        if (!entry) return { error: 'código no válido o ya usado' };
+        if (!entry) return { code: 'invalid-code', error: 'invalid or already used code' };
         if (entry.expiresAt <= Date.now()) {
             this.codes.delete(code);
             this.byInstance.delete(entry.instance);
-            return { error: 'código caducado' };
+            return { code: 'expired-code', error: 'expired code' };
         }
         this.codes.delete(code);
         this.byInstance.delete(entry.instance);

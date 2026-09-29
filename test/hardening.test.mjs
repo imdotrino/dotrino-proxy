@@ -49,7 +49,7 @@ describe('endurecimiento: tope de fan-out y de tamaño de frame', () => {
             const many = Array.from({ length: 65 }, (_, i) => `T${String(i).padStart(3, '0')}`);
             a.send({ to: many, message: 'spam', id: 'fanout-1' });
             const err = await a.waitFor((m) => m.type === 'error');
-            expect(err.error).toMatch(/destinatarios/i);
+            expect(err.code).toBe('too-many-recipients');
             expect(err.id).toBe('fanout-1');
         });
 
@@ -59,7 +59,7 @@ describe('endurecimiento: tope de fan-out y de tamaño de frame', () => {
             const pubkeys = Array.from({ length: 40 }, (_, i) => `pk-${i}`);
             a.send({ to: tokens, to_publickey: pubkeys, message: 'spam' });
             const err = await a.waitFor((m) => m.type === 'error');
-            expect(err.error).toMatch(/destinatarios/i);
+            expect(err.code).toBe('too-many-recipients');
         });
 
         it('no rechaza el caso normal de un solo destino por publickey', async () => {

@@ -147,7 +147,7 @@ const mesh = new Mesh({
             const { rid, code } = payload || {};
             const r = pairingCodes.redeem(code);
             link.send('pair-result', r.error
-                ? { rid, ok: false, error: r.error }
+                ? { rid, ok: false, code: r.code, error: r.error }
                 : { rid, ok: true, instance: r.instance, publickey: r.pubkey || null },
             { retain: false });
         } catch (e) { console.warn('[mesh] pair-redeem falló:', e.message); }
@@ -435,7 +435,7 @@ function forwardChannelOp(ws, message, owner, op, payload) {
         const p = pendingChanOps.get(rid);
         if (!p) return;
         pendingChanOps.delete(rid);
-        const e = { type: 'error', error: `el nodo dueño del canal no respondió (${op})` };
+        const e = { type: 'error', code: 'owner-timeout', error: `the channel owner node did not answer (${op})` };
         applyMessageIds(e, p.message);
         try { p.ws.send(JSON.stringify(e)); } catch (_) {}
     }, 6000);
@@ -444,7 +444,7 @@ function forwardChannelOp(ws, message, owner, op, payload) {
     if (!mesh.sendTo(owner.pubkey, 'chan-op', { rid, op, ...payload }, { retain: false })) {
         clearTimeout(timer);
         pendingChanOps.delete(rid);
-        const e = { type: 'error', error: 'sin enlace con el nodo dueño del canal' };
+        const e = { type: 'error', code: 'no-owner-link', error: 'no link to the channel owner node' };
         applyMessageIds(e, message);
         try { ws.send(JSON.stringify(e)); } catch (_) {}
         return false;
@@ -464,7 +464,7 @@ function handleRemoteChannelOp(payload, link) {
     const timestamp = new Date().toISOString();
 
     if (op === 'publish') {
-        if (typeof instance !== 'string') return reply({ type: 'error', error: 'publish sin instancia' });
+        if (typeof instance !== 'string') return reply({ type: 'error', code: 'no-instance', error: 'publish without an instance' });
         addToPublicChannel(channel, instance);
         notifyChannelMembersOfJoin(instance, channel);
         return reply({ type: 'published', channel, timestamp });
@@ -494,7 +494,7 @@ function handleRemoteChannelOp(payload, link) {
         const tokens = getChannelTokens(channel);
         return reply({ type: 'channel_count', channel, count: tokens.length, maxEntries: MAX_CHANNEL_ENTRIES, timestamp });
     }
-    reply({ type: 'error', error: `operación de canal desconocida: ${op}` });
+    reply({ type: 'error', code: 'unknown-op', error: `unknown channel operation: ${op}` });
 }
 
 /** Entrega a una conexión local un frame de canal que mandó el nodo dueño. */
@@ -1315,7 +1315,7 @@ function removeConnectionPair(token1, token2) {
     const pairKey = createPairKey(token1, token2);
     
     if (!connectionPairs.has(pairKey)) {
-        return { success: false, error: 'Los tokens no están pareados' };
+        return { success: false, code: 'not-paired', error: 'the tokens are not paired' };
     }
     
     // Remover el par
@@ -1418,39 +1418,39 @@ function emitAbuseNotice(senderToken, operation, originalMessage) {
 function validateChannelFormat(channelData) {
     // Validar que el objeto no sea nulo
     if (!channelData || typeof channelData !== 'object') {
-        return { valid: false, error: 'Formato de canal inválido: debe ser un objeto' };
+        return { valid: false, code: 'invalid-channel', error: 'invalid channel format: it must be an object' };
     }
     
     // Validar estructura básica
     if (!channelData.data || typeof channelData.data !== 'object') {
-        return { valid: false, error: 'Formato de canal inválido: falta campo "data"' };
+        return { valid: false, code: 'invalid-channel', error: 'invalid channel format: "data" is missing' };
     }
     
     if (!channelData.signature || typeof channelData.signature !== 'string') {
-        return { valid: false, error: 'Formato de canal inválido: falta campo "signature" o no es string' };
+        return { valid: false, code: 'invalid-channel', error: 'invalid channel format: "signature" is missing or not a string' };
     }
     
     // Validar campos requeridos en data
     const data = channelData.data;
     if (!data.name || typeof data.name !== 'string') {
-        return { valid: false, error: 'Formato de canal inválido: data.name es requerido y debe ser string' };
+        return { valid: false, code: 'invalid-channel', error: 'invalid channel format: data.name is required and must be a string' };
     }
     
     if (!data.publickey || typeof data.publickey !== 'string') {
-        return { valid: false, error: 'Formato de canal inválido: data.publickey es requerido y debe ser string' };
+        return { valid: false, code: 'invalid-channel', error: 'invalid channel format: data.publickey is required and must be a string' };
     }
     
     // Validar longitud máxima de 1000 caracteres para el JSON completo
     const jsonString = JSON.stringify(channelData);
     if (jsonString.length > 1000) {
-        return { valid: false, error: `Formato de canal inválido: excede 1000 caracteres (${jsonString.length})` };
+        return { valid: false, code: 'invalid-channel', error: `invalid channel format: over 1000 characters (${jsonString.length})` };
     }
     
     // Validar firma
     const signatureValid = validateSignature(channelData);
     
     if (!signatureValid) {
-        return { valid: false, error: 'Firma inválida' };
+        return { valid: false, code: 'bad-signature', error: 'invalid signature' };
     }
     
     return { valid: true, channelName: data.name };
@@ -1618,7 +1618,7 @@ const server = http.createServer((req, res) => {
     if (req.url === '/node' && req.method === 'GET') {
         const announcement = peerRegistry.selfAnnouncement(PROXY_PUBLIC_URL);
         if (!announcement) { res.writeHead(503, { 'content-type': 'application/json' });
-            res.end(JSON.stringify({ error: 'nodo sin identidad (no enrolado al vault)' })); return; }
+            res.end(JSON.stringify({ code: 'no-node-identity', error: 'node without identity (not enrolled in the vault)' })); return; }
         res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
         res.end(JSON.stringify(announcement));
         return;
@@ -1951,7 +1951,7 @@ wss.on('connection', (ws, req) => {
             if ((!hasTokenTo && !hasPubkeyTo) || !message.message) {
                 const errorResponse = {
                     type: 'error',
-                    error: 'Formato de mensaje inválido. Debe contener "to" o "to_publickey" y "message", o "type" para operaciones especiales'
+                    code: 'bad-message', error: 'invalid message format: it needs "to" or "to_publickey" and "message", or "type" for special operations'
                 };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
@@ -1968,7 +1968,7 @@ wss.on('connection', (ws, req) => {
             if (fanOutCount > MAX_FANOUT_PER_MESSAGE) {
                 const errorResponse = {
                     type: 'error',
-                    error: `Demasiados destinatarios en un mensaje (${fanOutCount}); el máximo es ${MAX_FANOUT_PER_MESSAGE}`
+                    code: 'too-many-recipients', error: `too many recipients in one message (${fanOutCount}); the maximum is ${MAX_FANOUT_PER_MESSAGE}`
                 };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
@@ -2076,7 +2076,7 @@ wss.on('connection', (ws, req) => {
             console.error('Error procesando mensaje:', error);
             ws.send(JSON.stringify({
                 type: 'error',
-                error: 'Error procesando el mensaje. Formato JSON inválido.'
+                code: 'bad-json', error: 'could not process the message: invalid JSON'
             }));
         }
     });
@@ -2090,7 +2090,7 @@ wss.on('connection', (ws, req) => {
         if (!validation.valid) {
             const errorResponse = {
                 type: 'error',
-                error: validation.error
+                code: validation.code, error: validation.error
             };
             
             // Incluir ID del mensaje original si existe
@@ -2108,7 +2108,7 @@ wss.on('connection', (ws, req) => {
         const home = channelOwnerOf(channelName);
         if (!home.local) {
             if (!home.known) {
-                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             forwardChannelOp(ws, message, home.owner, 'publish', { channel: channelName, instance: token });
@@ -2153,7 +2153,7 @@ wss.on('connection', (ws, req) => {
         if (!validation.valid) {
             const errorResponse = {
                 type: 'error',
-                error: validation.error
+                code: validation.code, error: validation.error
             };
             
             applyMessageIds(errorResponse, message);
@@ -2196,7 +2196,7 @@ wss.on('connection', (ws, req) => {
         if (!validation.valid) {
             const errorResponse = {
                 type: 'error',
-                error: validation.error
+                code: validation.code, error: validation.error
             };
             
             // Incluir ID del mensaje original si existe
@@ -2212,7 +2212,7 @@ wss.on('connection', (ws, req) => {
         const home = channelOwnerOf(channelName);
         if (!home.local) {
             if (!home.known) {
-                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             forwardChannelOp(ws, message, home.owner, 'list', { channel: channelName });
@@ -2245,14 +2245,14 @@ wss.on('connection', (ws, req) => {
     function handleWatchMessage(ws, message) {
         const validation = validateChannelFormat(message.channel);
         if (!validation.valid) {
-            const e = { type: 'error', error: validation.error };
+            const e = { type: 'error', code: validation.code, error: validation.error };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const channelName = validation.channelName;
         const home = channelOwnerOf(channelName);
         if (!home.local) {
             if (!home.known) {
-                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             // El registro de observadores lo lleva el dueño, igual que la
@@ -2273,7 +2273,7 @@ wss.on('connection', (ws, req) => {
     function handleUnwatchMessage(ws, message) {
         const validation = validateChannelFormat(message.channel);
         if (!validation.valid) {
-            const e = { type: 'error', error: validation.error };
+            const e = { type: 'error', code: validation.code, error: validation.error };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const channelName = validation.channelName;
@@ -2314,7 +2314,7 @@ wss.on('connection', (ws, req) => {
         if (typeof channelName !== 'string' || channelName.length === 0) {
             const errorResponse = {
                 type: 'error',
-                error: 'channel requerido (string no vacío)'
+                code: 'no-channel', error: 'channel is required (a non-empty string)'
             };
             applyMessageIds(errorResponse, message);
             ws.send(JSON.stringify(errorResponse));
@@ -2324,7 +2324,7 @@ wss.on('connection', (ws, req) => {
         const home = channelOwnerOf(channelName);
         if (!home.local) {
             if (!home.known) {
-                const e = { type: 'error', error: `nodo desconocido para el canal ${channelName}` };
+                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             forwardChannelOp(ws, message, home.owner, 'count', { channel: channelName });
@@ -2380,7 +2380,7 @@ wss.on('connection', (ws, req) => {
         if (!targetConn) {
             const errorResponse = {
                 type: 'error',
-                error: `Token destino ${targetToken} no encontrado o no conectado`
+                code: 'unknown-token', error: `target token ${targetToken} not found or not connected`
             };
             
             // Incluir ID del mensaje original si existe
@@ -2410,6 +2410,7 @@ wss.on('connection', (ws, req) => {
         } else {
             const errorResponse = {
                 type: 'error',
+                code: result.code,
                 error: result.error
             };
             
@@ -2445,13 +2446,13 @@ wss.on('connection', (ws, req) => {
                 return;
             }
             if (!data || data.publickey !== mia) {
-                const e = { type: 'error', error: 'encpub: el anuncio no es de la identidad de esta conexión' };
+                const e = { type: 'error', code: 'encpub-not-yours', error: 'encpub: the announcement does not belong to the identity of this connection' };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
                 return;
             }
             if (!verifyEncPubStatement(data, sig)) {
-                const e = { type: 'error', error: 'encpub: anuncio inválido o mal firmado' };
+                const e = { type: 'error', code: 'encpub-invalid', error: 'encpub: invalid or badly signed announcement' };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
                 return;
@@ -2494,7 +2495,7 @@ wss.on('connection', (ws, req) => {
                 return;
             }
             if (pedidas.length > MAX_ENCPUB_LOOKUP) {
-                const e = { type: 'error', error: `enc-lookup: demasiadas llaves (${pedidas.length}); el máximo es ${MAX_ENCPUB_LOOKUP}` };
+                const e = { type: 'error', code: 'too-many-keys', error: `enc-lookup: too many keys (${pedidas.length}); the maximum is ${MAX_ENCPUB_LOOKUP}` };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
                 return;
@@ -2526,7 +2527,7 @@ wss.on('connection', (ws, req) => {
             if (!data || !sig || data.op !== 'identify' || !data.publickey || !data.token || !data.ts) {
                 const errorResponse = {
                     type: 'error',
-                    error: 'Formato identify inválido (esperado data:{op:"identify",publickey,token,ts}+signature)'
+                    code: 'bad-format', error: 'invalid identify format (expected data:{op:"identify",publickey,token,ts}+signature)'
                 };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
@@ -2534,13 +2535,13 @@ wss.on('connection', (ws, req) => {
             }
             const skew = Math.abs(Date.now() - Number(data.ts));
             if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-                const errorResponse = { type: 'error', error: 'identify ts fuera de la ventana ±5min' };
+                const errorResponse = { type: 'error', code: 'stale', error: 'identify ts outside the ±5 min window' };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
                 return;
             }
             if (data.token !== ws.token) {
-                const errorResponse = { type: 'error', error: 'identify.token no coincide con la conexión' };
+                const errorResponse = { type: 'error', code: 'token-mismatch', error: 'identify.token does not match this connection' };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
                 return;
@@ -2551,7 +2552,7 @@ wss.on('connection', (ws, req) => {
                 data.aud.replace(/\/+$/, '') === PROXY_AUDIENCE;
             if (!audOk) {
                 if (PROXY_AUDIENCE_ENFORCE) {
-                    const errorResponse = { type: 'error', error: 'identify sin destinatario o dirigido a otro proxio' };
+                    const errorResponse = { type: 'error', code: 'wrong-audience', error: 'identify without an audience, or addressed to another proxy' };
                     applyMessageIds(errorResponse, message);
                     ws.send(JSON.stringify(errorResponse));
                     return;
@@ -2574,7 +2575,7 @@ wss.on('connection', (ws, req) => {
             }
             const ok = verifySignatureWithJWK(data, sig, pubKeyJwk);
             if (!ok) {
-                const errorResponse = { type: 'error', error: 'Firma identify inválida' };
+                const errorResponse = { type: 'error', code: 'bad-signature', error: 'invalid identify signature' };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
                 return;
@@ -2652,12 +2653,12 @@ wss.on('connection', (ws, req) => {
             const data = message.data;
             const sig  = message.signature;
             if (!data || !sig || data.op !== 'push-subscribe' || !data.publickey || !data.subscription || !data.ts) {
-                const e = { type: 'error', error: 'Formato push-subscribe inválido (esperado data:{op:"push-subscribe",publickey,subscription,ts}+signature)' };
+                const e = { type: 'error', code: 'bad-format', error: 'invalid push-subscribe format (expected data:{op:"push-subscribe",publickey,subscription,ts}+signature)' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             const skew = Math.abs(Date.now() - Number(data.ts));
             if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-                const e = { type: 'error', error: 'push-subscribe ts fuera de la ventana ±5min' };
+                const e = { type: 'error', code: 'stale', error: 'push-subscribe ts outside the ±5 min window' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             let pubKeyJwk;
@@ -2667,7 +2668,7 @@ wss.on('connection', (ws, req) => {
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
-                const e = { type: 'error', error: 'Firma push-subscribe inválida' };
+                const e = { type: 'error', code: 'bad-signature', error: 'invalid push-subscribe signature' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             // La subscription viaja como string JSON (sobre plano => firma canónica
@@ -2676,7 +2677,7 @@ wss.on('connection', (ws, req) => {
             if (typeof subscription === 'string') {
                 try { subscription = JSON.parse(subscription); }
                 catch (_) {
-                    const e = { type: 'error', error: 'push-subscribe.subscription JSON inválido' };
+                    const e = { type: 'error', code: 'bad-subscription', error: 'push-subscribe.subscription is not valid JSON' };
                     applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
                 }
             }
@@ -2708,12 +2709,12 @@ wss.on('connection', (ws, req) => {
             const data = message.data;
             const sig  = message.signature;
             if (!data || !sig || data.op !== 'push-unsubscribe' || !data.publickey || !data.ts) {
-                const e = { type: 'error', error: 'Formato push-unsubscribe inválido' };
+                const e = { type: 'error', code: 'bad-format', error: 'invalid push-unsubscribe format' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             const skew = Math.abs(Date.now() - Number(data.ts));
             if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-                const e = { type: 'error', error: 'push-unsubscribe ts fuera de la ventana ±5min' };
+                const e = { type: 'error', code: 'stale', error: 'push-unsubscribe ts outside the ±5 min window' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             let pubKeyJwk;
@@ -2723,7 +2724,7 @@ wss.on('connection', (ws, req) => {
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
-                const e = { type: 'error', error: 'Firma push-unsubscribe inválida' };
+                const e = { type: 'error', code: 'bad-signature', error: 'invalid push-unsubscribe signature' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             removePushSubscription(data.publickey);
@@ -2741,12 +2742,12 @@ wss.on('connection', (ws, req) => {
         const data = message.data;
         const sig  = message.signature;
         if (!data || !sig || data.op !== op || !data.publickey || !data.ts) {
-            const e = { type: 'error', error: `Formato ${op} inválido` };
+            const e = { type: 'error', code: 'bad-format', error: `invalid ${op} format` };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
         }
         const skew = Math.abs(Date.now() - Number(data.ts));
         if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-            const e = { type: 'error', error: `${op} ts fuera de la ventana ±5min` };
+            const e = { type: 'error', code: 'stale', error: `${op} ts outside the ±5 min window` };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
         }
         let jwk;
@@ -2756,7 +2757,7 @@ wss.on('connection', (ws, req) => {
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
         }
         if (!verifySignatureWithJWK(data, sig, jwk)) {
-            const e = { type: 'error', error: `Firma ${op} inválida` };
+            const e = { type: 'error', code: 'bad-signature', error: `invalid ${op} signature` };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
         }
         return data;
@@ -2820,7 +2821,7 @@ wss.on('connection', (ws, req) => {
             let spec;
             try { spec = JSON.parse(data.spec); }
             catch (_) {
-                const e = { type: 'error', error: 'schedule-push.spec JSON inválido' };
+                const e = { type: 'error', code: 'bad-spec', error: 'schedule-push.spec is not valid JSON' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             let nextFire;
@@ -2829,7 +2830,7 @@ wss.on('connection', (ws, req) => {
             if (cron) {
                 nextFire = cronNextFire(cron, tz, Date.now());
                 if (!nextFire) {
-                    const e = { type: 'error', error: 'cron inválido' };
+                    const e = { type: 'error', code: 'bad-cron', error: 'invalid cron' };
                     applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
                 }
             } else {
@@ -2892,7 +2893,7 @@ wss.on('connection', (ws, req) => {
     /** Emite (o renueva) la cita de ESTA conexión. */
     function handlePairCodeMessage(ws, message) {
         if (!nodeIdentity) {
-            const e = { type: 'error', error: 'este nodo no puede emitir citas (sin identidad de nodo)' };
+            const e = { type: 'error', code: 'no-node-identity', error: 'this node cannot issue codes (it has no node identity)' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const res = pairingCodes.create({
@@ -2902,7 +2903,7 @@ wss.on('connection', (ws, req) => {
             ttlMs: message.ttlMs
         });
         if (!res) {
-            const e = { type: 'error', error: 'no se pudo emitir la cita' };
+            const e = { type: 'error', code: 'code-failed', error: 'could not issue the code' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const response = { type: 'pair-code', code: res.code, expiresAt: res.expiresAt, node: nodeIdentity.nodeId };
@@ -2931,7 +2932,7 @@ wss.on('connection', (ws, req) => {
         // símbolos que este ecosistema no emite no puede existir en ningún nodo,
         // así que preguntarlo sería tráfico s2s regalado a quien mande basura.
         if (!code || code.length !== nodeIdentityLib.CODE_HINT_LEN + 4 || !require('./alphabet').isEmittable(code)) {
-            const e = { type: 'pair-redeem', ok: false, error: 'código no válido' };
+            const e = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid code' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
         const hint = code.slice(0, nodeIdentityLib.CODE_HINT_LEN);
@@ -2943,14 +2944,14 @@ wss.on('connection', (ws, req) => {
         if (soyCandidato && remotos.length === 0) {
             const r = pairingCodes.redeem(code);
             const response = r.error
-                ? { type: 'pair-redeem', ok: false, error: r.error }
+                ? { type: 'pair-redeem', ok: false, code: r.code, error: r.error }
                 : { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
             return;
         }
         if (!soyCandidato && remotos.length === 0) {
-            const e = { type: 'pair-redeem', ok: false, error: 'ningún nodo conocido puede tener ese código' };
+            const e = { type: 'pair-redeem', ok: false, code: 'unknown-code-node', error: 'no known node can hold that code' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
 
@@ -2975,10 +2976,10 @@ wss.on('connection', (ws, req) => {
             } else if (pending.respuestas.length > 1) {
                 // Colisión real o un nodo mintiendo. En los dos casos la respuesta
                 // correcta es la misma: no adivinar.
-                response = { type: 'pair-redeem', ok: false, error: 'código ambiguo: pedí uno nuevo' };
+                response = { type: 'pair-redeem', ok: false, code: 'ambiguous-code', error: 'ambiguous code: ask for a new one' };
                 console.warn(`[pair] código ambiguo (${pending.respuestas.length} nodos dicen tenerlo) — filtro ${hint}`);
             } else {
-                response = { type: 'pair-redeem', ok: false, error: 'código no válido o ya usado' };
+                response = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid or already used code' };
             }
             applyMessageIds(response, pending.message);
             try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
