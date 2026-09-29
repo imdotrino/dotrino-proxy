@@ -52,8 +52,15 @@ const NS = 'proxy';
  * ya no son de las que «solo se leen al arrancar» y avisar de un reinicio sería
  * mentir. Son además las que distinguen a una máquina de otra, o sea justo las que
  * no debían obligar a mantener un `.env` a mano en cada VPS.
+ *
+ * Las llaves del timbre (`FCM_*`, `APNS_*`) tampoco: `fcm.js` y `apns.js` las leen en cada
+ * timbre, así que valen en cuanto llegan. El aviso de reiniciar por ellas era falso, y
+ * reiniciar el proxio por un cambio de llave cortaba todas las conexiones para nada.
  */
-const SE_REAPLICAN = /^TURN_|^PROXY_(PEERS|PUBLIC_URL)$/;
+const SE_REAPLICAN = /^TURN_|^PROXY_(PEERS|PUBLIC_URL)$|^FCM_|^APNS_/;
+
+const { fcmEnabled } = require('./fcm');
+const { apnsEnabled } = require('./apns');
 
 function serviceDir() {
     return process.env.VAULT_SERVICE_DIR || path.join(__dirname, 'vault-service');
@@ -93,6 +100,8 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
             // pero el operador quiere saber que quedó basura por limpiar.
             log(`[vault] pisaron el .env de esta máquina: ${overridden.join(', ')}`);
         }
+        if (injected.some((k) => /^FCM_/.test(k))) log(`[push] FCM ${fcmEnabled() ? 'enabled' : 'still off (bad FCM_SERVICE_ACCOUNT_B64)'} from the vault`);
+        if (injected.some((k) => /^APNS_/.test(k))) log(`[push] APNs ${apnsEnabled() ? 'enabled' : 'still off (incomplete APNS_*)'} from the vault`);
         const tarde = injected.filter((k) => !SE_REAPLICAN.test(k));
         if (tarde.length) {
             log(`[vault] ⚠ estas sólo se leen al arrancar, así que NO están activas todavía: ${tarde.join(', ')}`);
