@@ -157,7 +157,7 @@ class TokenManager {
         
         // Liberar tokens inactivos
         inactiveTokens.forEach(token => {
-            console.log(`Liberando token inactivo: ${token} (inactivo por ${Math.floor((now - this.activeTokens.get(token).lastActivity) / 60000)} minutos)`);
+            console.log(`[tokens] releasing idle token ${token} (idle for ${Math.floor((now - this.activeTokens.get(token).lastActivity) / 60000)} min)`);
             this.activeTokens.delete(token);
         });
 
@@ -170,7 +170,7 @@ class TokenManager {
         return setInterval(() => {
             const cleaned = this.cleanupInactiveTokens();
             if (cleaned > 0) {
-                console.log(`Limpieza automática: ${cleaned} tokens inactivos removidos`);
+                console.log(`[tokens] cleanup: removed ${cleaned} idle token(s)`);
             }
         }, intervalMinutes * 60 * 1000);
     }

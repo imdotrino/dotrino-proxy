@@ -163,7 +163,7 @@ async function loadNodeIdentity(dir) {
         // Sin la lib (instalación incompleta) solo se puede leer el formato en
         // claro. Se dice, porque si el archivo está cifrado el nodo se queda sin
         // identidad y hay que saber por qué.
-        console.error('[fed] no se pudo usar el lector del vault (%s); se intenta el formato en claro', e.message);
+        console.error('[fed] could not use the vault reader (%s); trying the plain format', e.message);
         raw = readPlainIdentity(dir);
     }
     return identityFromRecord(raw);

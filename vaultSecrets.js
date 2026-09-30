@@ -88,24 +88,24 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
         const { applyEnv, watchEnv } = await import('@dotrino/vault/env');
         const secrets = await waitForSecrets({
             dir, ns: NS,
-            onRetry: (e, delay) => log(`[vault] sin configuración todavía (${e.message}); reintento en ${Math.round(delay / 1000)}s`)
+            onRetry: (e, delay) => log(`[vault] no config yet (${e.message}); retrying in ${Math.round(delay / 1000)}s`)
         });
         if (stopped) return;
 
         const { injected, overridden } = applyEnv(secrets);
-        log(`[vault] ${injected.length} valor(es) del vault aplicados al entorno`);
+        log(`[vault] applied ${injected.length} value(s) from the vault to the environment`);
         if (overridden.length) {
             // Que el vault haya tenido que pisar algo significa que el `.env` de
             // esta máquina tiene valores viejos. Ganó el vault (para eso está),
             // pero el operador quiere saber que quedó basura por limpiar.
-            log(`[vault] pisaron el .env de esta máquina: ${overridden.join(', ')}`);
+            log(`[vault] they override this machine's .env: ${overridden.join(', ')}`);
         }
         if (injected.some((k) => /^FCM_/.test(k))) log(`[push] FCM ${fcmEnabled() ? 'enabled' : 'still off (bad FCM_SERVICE_ACCOUNT_B64)'} from the vault`);
         if (injected.some((k) => /^APNS_/.test(k))) log(`[push] APNs ${apnsEnabled() ? 'enabled' : 'still off (incomplete APNS_*)'} from the vault`);
         const tarde = injected.filter((k) => !SE_REAPLICAN.test(k));
         if (tarde.length) {
-            log(`[vault] ⚠ estas sólo se leen al arrancar, así que NO están activas todavía: ${tarde.join(', ')}`);
-            log('[vault] ⚠ reinicia el proxy para que tomen efecto.');
+            log(`[vault] ⚠ these are only read at startup, so they are NOT active yet: ${tarde.join(', ')}`);
+            log('[vault] ⚠ restart the proxy for them to take effect.');
         }
         onSecrets(secrets, { injected, overridden });
 
@@ -146,8 +146,8 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
             // alguien se acuerde. Un proxio caído es justo el que no recibe avisos.
             applied: secrets,
             onUpdate: (info) => handleVaultUpdate(info, { log, onPending, exitDelayMs })
-        }).catch((e) => { log('[vault] sin escucha de cambios (' + e.message + ')'); return null; });
-    })().catch((e) => log('[vault] carga de configuración abortada:', e.message));
+        }).catch((e) => { log('[vault] not listening for changes (' + e.message + ')'); return null; });
+    })().catch((e) => log('[vault] config load aborted:', e.message));
     return {
         enabled: true,
         stop: () => { stopped = true; try { watcher?.stop() } catch (_) {} }
@@ -163,8 +163,8 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
  */
 function handleVaultUpdate({ reason, ts, via }, { log = console.log, onPending, exitDelayMs = 300, exit } = {}) {
     if (reason === 'revoked') {
-        log('[vault] ⚠ la bóveda REVOCÓ a este proxio. Sigue transportando, pero no volverá');
-        log('[vault] ⚠ a leer configuración: re-enrólalo o bájalo.');
+        log('[vault] ⚠ the vault REVOKED this proxy. It keeps relaying, but it will not read');
+        log('[vault] ⚠ config again: re-enroll it or take it down.');
         onPending?.({ reason, ts });
         return 'stay';
     }
@@ -172,11 +172,11 @@ function handleVaultUpdate({ reason, ts, via }, { log = console.log, onPending, 
         // Nadie avisó: lo encontró preguntando al conectar. Decirlo importa porque es el
         // síntoma de que el proxio estuvo un rato incomunicado — y de que el aviso, que
         // es el camino rápido, se perdió por el camino.
-        log('[vault] nadie avisó del cambio: lo encontró al comparar con la bóveda.');
+        log('[vault] nobody announced the change: found it by comparing with the vault.');
     }
-    log('[vault] configuración NUEVA en la bóveda: terminando para arrancar con ella.');
-    log('[vault] las conexiones se cortan unos segundos y los clientes reconectan solos;');
-    log('[vault] seguir vivo dejaría en memoria la llave que se acaba de rotar.');
+    log('[vault] NEW config in the vault: exiting to start with it.');
+    log('[vault] connections drop for a few seconds and clients reconnect on their own;');
+    log('[vault] staying alive would keep the just-rotated key in memory.');
     onPending?.({ reason, ts });
     // Salida LIMPIA (0): lo levanta su supervisor (pm2/systemd `Restart=always`).
     // Con retraso corto a propósito — la salida de un proceso supervisado va por una

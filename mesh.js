@@ -164,7 +164,7 @@ class MeshLink {
                 clearTimeout(helloTimer);
                 this.ready = true;
                 this.backoff = BACKOFF_MIN_MS;
-                this.log(`[mesh] enlace listo con ${this.url} (id ${f.nodeId || '?'})`);
+                this.log(`[mesh] link ready with ${this.url} (id ${f.nodeId || '?'})`);
                 this._flush();
                 return;
             }
@@ -475,7 +475,7 @@ class Mesh {
                 }
                 const known = this.registry.byNodePubkey(body.from);
                 if (!known) {
-                    this.log(`[mesh] rechazado: nodo entrante desconocido (no pineado)`);
+                    this.log(`[mesh] rejected: unknown incoming node (not pinned)`);
                     try { ws.close(1008, 'nodo desconocido'); } catch (_) {}
                     // Que un desconocido toque la puerta es la mejor señal de que
                     // hay que ir a descubrir: casi siempre es un peer configurado
@@ -486,7 +486,7 @@ class Mesh {
                     return;
                 }
                 if (!verifyBody(body, f.signature, known.pubkey)) {
-                    this.log(`[mesh] rechazado: firma de hello inválida de ${known.url}`);
+                    this.log(`[mesh] rejected: invalid hello signature from ${known.url}`);
                     try { ws.close(1008, 'firma inválida'); } catch (_) {}
                     return;
                 }
@@ -498,7 +498,7 @@ class Mesh {
                 this.inbound.set(known.pubkey, ws);
                 ws.meshPeer = known;
                 send({ t: 'ready', nodeId: this.identity.nodeId });
-                this.log(`[mesh] enlace entrante aceptado de ${known.url} (id ${known.nodeId})`);
+                this.log(`[mesh] incoming link accepted from ${known.url} (id ${known.nodeId})`);
                 return;
             }
 
@@ -510,7 +510,7 @@ class Mesh {
             // para siempre, convirtiendo el límite en un bucle infinito.
             if (!buckets.allow(f.op)) {
                 if (buckets.dropped === 1 || buckets.dropped % 100 === 0) {
-                    this.log(`[mesh] límite s2s: descartadas ${buckets.dropped} tramas de ${peer.url} (última: ${f.op})`);
+                    this.log(`[mesh] s2s limit: dropped ${buckets.dropped} frames from ${peer.url} (last: ${f.op})`);
                 }
                 send({ t: 'ack', seq: f.seq });
                 return;

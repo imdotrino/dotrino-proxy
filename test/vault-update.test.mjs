@@ -48,7 +48,7 @@ describe('aviso de la bóveda', () => {
         );
 
         expect(decision).toBe('restart');
-        expect(lines.some((l) => /nadie avisó/.test(l))).toBe(true);
+        expect(lines.some((l) => /nobody announced the change/.test(l))).toBe(true);
         vi.advanceTimersByTime(300);
         expect(exit).toHaveBeenCalledTimes(1);
         vi.useRealTimers();

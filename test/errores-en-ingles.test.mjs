@@ -22,3 +22,20 @@ describe('respuestas del proxio', () => {
     })
   }
 })
+
+/**
+ * Y LOS LOGS TAMBIÉN (§8.1): son lo que se pega en un issue y lo que se busca. `enroll-vault.js`
+ * queda fuera a propósito: es un comando interactivo y lo que imprime es copia para quien lo
+ * usa, que puede ir en español.
+ */
+describe('logs del proxio', () => {
+  const archivos = ['server.js', 'mesh.js', 'peers.js', 'tokenManager.js', 'vaultSecrets.js', 'nodeIdentity.js',
+    'persistence.js', 'apns.js', 'fcm.js', 'turnCredentials.js', 'pairingCodes.js']
+  for (const archivo of archivos) {
+    it(`${archivo}: ningún log en español`, () => {
+      const fuente = fs.readFileSync(path.join(raiz, archivo), 'utf8')
+      const llamadas = [...fuente.matchAll(/(?:console\.(?:log|warn|error|info)|\blog|this\.log)\(\s*([`'"])((?:\\.|(?!\1).)*)\1/g)].map((m) => m[2])
+      expect(llamadas.filter((t) => ESPAÑOL.test(t))).toEqual([])
+    })
+  }
+})

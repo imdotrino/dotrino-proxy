@@ -80,7 +80,7 @@ class PeerRegistry {
         for (const r of rows) {
             if (!nodeIdMatches(r.node_id, r.pubkey)) {
                 try { this.persist.deletePeerNode(r.url); } catch (_) {}
-                this.log(`[fed] descartado pineo obsoleto de ${r.url} (su id no se deriva de su llave)`);
+                this.log(`[fed] dropped stale pin for ${r.url} (its id does not derive from its key)`);
                 continue;
             }
             this._index({ url: r.url, pubkey: r.pubkey, nodeId: r.node_id });
@@ -203,7 +203,7 @@ class PeerRegistry {
         for (const url of this.urls) {
             const r = await this.discover(url);
             out.push({ url, ...r });
-            if (r.status === 'pinned') this.log(`[fed] peer pineado: ${url} (id ${r.peer.nodeId})`);
+            if (r.status === 'pinned') this.log(`[fed] peer pinned: ${url} (id ${r.peer.nodeId})`);
             else if (r.status === 'conflict') this.log(`[fed] CONFLICTO: ${r.reason}`);
             else if (r.status === 'unreachable') this.log(`[fed] peer inalcanzable ${url}: ${r.reason}`);
         }

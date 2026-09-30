@@ -129,17 +129,17 @@ const mesh = new Mesh({
             const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet } = payload || {};
             if (typeof toPubkey !== 'string' || message === undefined) return;
             deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true);
-        } catch (e) { console.warn('[mesh] entrega federada falló:', e.message); }
+        } catch (e) { console.warn('[mesh] federated delivery failed:', e.message); }
     },
     // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
     onRelay: (payload, link) => {
         try { deliverRelayed(payload, link); }
-        catch (e) { console.warn('[mesh] relay falló:', e.message); }
+        catch (e) { console.warn('[mesh] relay failed:', e.message); }
     },
     // Un peer nos avisa que una instancia suya, con la que teníamos par, se fue.
     onPeerGone: (payload) => {
         try { handleRemotePeerGone(payload); }
-        catch (e) { console.warn('[mesh] peer-gone falló:', e.message); }
+        catch (e) { console.warn('[mesh] peer-gone failed:', e.message); }
     },
     // Un peer nos pide canjear una cita que emitimos NOSOTROS.
     onPairRedeem: (payload, link) => {
@@ -150,12 +150,12 @@ const mesh = new Mesh({
                 ? { rid, ok: false, code: r.code, error: r.error }
                 : { rid, ok: true, instance: r.instance, publickey: r.pubkey || null },
             { retain: false });
-        } catch (e) { console.warn('[mesh] pair-redeem falló:', e.message); }
+        } catch (e) { console.warn('[mesh] pair-redeem failed:', e.message); }
     },
     // Un peer opera sobre un canal del que NOSOTROS somos dueños.
     onChanOp: (payload, link) => {
         try { handleRemoteChannelOp(payload, link); }
-        catch (e) { console.warn('[mesh] chan-op falló:', e.message); }
+        catch (e) { console.warn('[mesh] chan-op failed:', e.message); }
     },
     // El nodo dueño contesta la operación de canal que le pedimos.
     onChanResult: (payload) => {
@@ -167,7 +167,7 @@ const mesh = new Mesh({
             const response = { ...payload.frame };
             applyMessageIds(response, pending.message);
             try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
-        } catch (e) { console.warn('[mesh] chan-result falló:', e.message); }
+        } catch (e) { console.warn('[mesh] chan-result failed:', e.message); }
     },
     // Un peer nos reparte un anuncio de llave de cifrado. Se verifica igual que si
     // viniera de un cliente: la malla no da confianza, la firma sí.
@@ -175,12 +175,12 @@ const mesh = new Mesh({
         try {
             const { data, signature } = payload || {};
             storeEncPub(data, signature);
-        } catch (e) { console.warn('[mesh] encpub falló:', e.message); }
+        } catch (e) { console.warn('[mesh] encpub failed:', e.message); }
     },
     // El nodo dueño nos manda un evento de canal para una conexión nuestra.
     onChanEvent: (payload) => {
         try { deliverChannelEvent(payload); }
-        catch (e) { console.warn('[mesh] chan-event falló:', e.message); }
+        catch (e) { console.warn('[mesh] chan-event failed:', e.message); }
     },
     // Un candidato contesta el canje que le pedimos. Se ACUMULAN las respuestas
     // afirmativas: la decisión se toma con todas, nunca con la primera.
@@ -194,7 +194,7 @@ const mesh = new Mesh({
                 pending.respuestas.push({ instance: payload.instance, pubkey: payload.publickey || null });
             }
             if (pending.recibidas >= pending.esperadas) pending.resolver();
-        } catch (e) { console.warn('[mesh] pair-result falló:', e.message); }
+        } catch (e) { console.warn('[mesh] pair-result failed:', e.message); }
     }
 });
 
@@ -211,7 +211,7 @@ async function initNodeIdentity() {
     if (nodeIdentityReady) return nodeIdentityReady;
     nodeIdentityReady = (async () => {
         try { nodeIdentity = await nodeIdentityLib.loadNodeIdentity(serviceDir()); }
-        catch (e) { console.error('[fed] identidad de nodo inválida:', e.message); nodeIdentity = null; }
+        catch (e) { console.error('[fed] invalid node identity:', e.message); nodeIdentity = null; }
         // Las instancias que emite este nodo llevan su id delante: es lo que las
         // hace únicas en todo el ecosistema y ruteables sin preguntarle a nadie.
         // El id se DERIVA de la llave del nodo, así que nadie puede usar el ajeno.
@@ -244,7 +244,7 @@ function loadPeerPins() {
     if (pinsLoaded) return;
     pinsLoaded = true;
     const restored = peerRegistry.load();
-    if (restored) console.log(`[fed] ${restored} peer(s) pineados restaurados de disco`);
+    if (restored) console.log(`[fed] restored ${restored} pinned peer(s) from disk`);
 }
 
 /**
@@ -257,18 +257,18 @@ function loadPeerPins() {
 function startFederation() {
     if (federationStarted) return true;
     if (!PROXY_PEERS.length) return false;
-    console.log(`[fed] federación activa con ${PROXY_PEERS.length} peer(s): ${PROXY_PEERS.join(', ')}`);
+    console.log(`[fed] federation active with ${PROXY_PEERS.length} peer(s): ${PROXY_PEERS.join(', ')}`);
     if (!nodeIdentity) {
         // Sin identidad no se puede firmar ni verificar: la federación queda
         // inerte en vez de caer al secreto compartido de antes. Se dice fuerte
         // porque el síntoma (nada cruza) es idéntico a no tener peers.
-        console.error('[fed] ESTE NODO NO TIENE IDENTIDAD (falta vault-service/service-identity.json):');
-        console.error('[fed] no puede firmar ni aceptar tramas s2s. Enrola el nodo: node enroll-vault.js …');
+        console.error('[fed] THIS NODE HAS NO IDENTITY (vault-service/service-identity.json is missing):');
+        console.error('[fed] cannot sign or accept s2s frames. Enroll the node: node enroll-vault.js …');
         return false;
     }
-    console.log(`[fed] identidad de nodo lista — id ${nodeIdentity.nodeId}`);
+    console.log(`[fed] node identity ready — id ${nodeIdentity.nodeId}`);
     loadPeerPins();
-    peerRegistry.discoverAll().catch((e) => console.warn('[fed] descubrimiento inicial falló:', e.message));
+    peerRegistry.discoverAll().catch((e) => console.warn('[fed] initial discovery failed:', e.message));
     peerRegistry.startRefresh();
     mesh.start();
     federationStarted = true;
@@ -296,15 +296,15 @@ function applyFederationConfig(log = console.log) {
         PROXY_PUBLIC_URL = publicUrl;
         // Se usa al responder `/node`, así que no hay nada que reiniciar: el
         // próximo peer que venga a pinearme ya lee la buena.
-        log(`[fed] URL pública desde la bóveda: ${PROXY_PUBLIC_URL || '(ninguna)'}`);
+        log(`[fed] public URL from the vault: ${PROXY_PUBLIC_URL || '(none)'}`);
     }
     const peers = parsePeerList(process.env.PROXY_PEERS);
     if (peers.join(',') !== PROXY_PEERS.join(',')) {
         PROXY_PEERS = peers;
         peerRegistry.setUrls(peers);
         mesh.setUrls(peers);
-        log(`[fed] peers desde la bóveda: ${peers.length ? peers.join(', ') : '(ninguno)'}`);
-        if (federationStarted) peerRegistry.discoverAll().catch((e) => log('[fed] descubrimiento falló: ' + e.message));
+        log(`[fed] peers from the vault: ${peers.length ? peers.join(', ') : '(none)'}`);
+        if (federationStarted) peerRegistry.discoverAll().catch((e) => log('[fed] discovery failed: ' + e.message));
     }
     startFederation();
 }
@@ -638,7 +638,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: payload, signal: ctrl.signal
-        }).catch(e => console.warn(`[fed] forward a ${peer} falló:`, e.message)).finally(() => clearTimeout(t));
+        }).catch(e => console.warn(`[fed] forward to ${peer} failed:`, e.message)).finally(() => clearTimeout(t));
     }
 }
 
@@ -684,7 +684,7 @@ for (const q of offlineQueues.values()) {
     for (const item of q) totalQueueBytes += item.bytes || 0;
 }
 if (offlineQueues.size) {
-    console.log(`[persist] cola offline rehidratada: ${offlineQueues.size} pubkey(s), ${totalQueueBytes} bytes`);
+    console.log(`[persist] offline queue rehydrated: ${offlineQueues.size} pubkey(s), ${totalQueueBytes} bytes`);
 }
 
 function bytesOfMessage(m) {
@@ -968,14 +968,14 @@ if (pushEnabled) {
     console.log(fcmEnabled() ? '[push] FCM enabled (service account from FCM_SERVICE_ACCOUNT_B64).' : '[push] FCM off: no FCM_SERVICE_ACCOUNT_B64 (native app will not be rung).');
     console.log(apnsEnabled() ? '[push] APNs enabled (APNS_KEY_B64/APNS_KEY_ID/APNS_TEAM_ID).' : '[push] APNs off: no APNS_KEY_B64/APNS_KEY_ID/APNS_TEAM_ID (iOS apps will not be rung).');
 } else {
-    console.warn('[push] VAPID no disponible: el timbre push queda deshabilitado (la cola offline sigue funcionando).');
+    console.warn('[push] VAPID unavailable: push ringing is disabled (the offline queue keeps working).');
 }
 
 // publickey JWK string -> PushSubscription. Working set en RAM, respaldado en
 // SQLite (write-through). Rehidratado al arrancar.
 const pushSubscriptions = persist.loadPushSubscriptions();
 if (pushSubscriptions.size) {
-    console.log(`[push] ${pushSubscriptions.size} subscription(s) rehidratadas de SQLite`);
+    console.log(`[push] rehydrated ${pushSubscriptions.size} subscription(s) from SQLite`);
 }
 
 function setPushSubscription(pubkey, subscription) {
@@ -1015,7 +1015,7 @@ function ringPush(pubkey, extra) {
             const code = err && err.statusCode;
             if (code === 404 || code === 410) {
                 removePushSubscription(pubkey);
-                console.log(`[push] subscription expirada (${code}) borrada para una pubkey`);
+                console.log(`[push] expired subscription (${code}) deleted for a pubkey`);
             } else {
                 console.error('[push] error enviando timbre:', code || err.message);
             }
@@ -1039,7 +1039,7 @@ function cronNextFire(cron, tz, from) {
         const it = CronExpressionParser.parse(cron, { currentDate: new Date(from), tz: tz || 'UTC' });
         return it.next().toDate().getTime();
     } catch (e) {
-        console.error('[sched] cron inválido:', cron, e.message);
+        console.error('[sched] invalid cron:', cron, e.message);
         return null;
     }
 }
@@ -1057,7 +1057,7 @@ function reconcileScheduledPushes() {
             persist.deleteScheduledPush(job.id); // one-shot vencido → descartar
         }
     }
-    if (due.length) console.log(`[sched] ${due.length} job(s) vencidos reconciliados al arrancar`);
+    if (due.length) console.log(`[sched] reconciled ${due.length} overdue job(s) at startup`);
 }
 
 // Tick del scheduler: dispara los jobs vencidos y reprograma/borra.
@@ -1183,7 +1183,7 @@ function cleanupExpiredChannelEntries() {
     }
     
     if (totalRemoved > 0) {
-        console.log(`Limpieza de canales: ${totalRemoved} entradas expiradas removidas`);
+        console.log(`[channels] cleanup: removed ${totalRemoved} expired entr${totalRemoved === 1 ? 'y' : 'ies'}`);
     }
 }
 
@@ -1722,11 +1722,11 @@ function startVaultSecretsLoop(log = console.log) {
             // apiToken} como antes dejaba los topes clavados en el `.env` viejo.
             if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
             turnIssuer = createTurnIssuer();
-            if (turnIssuer.enabled) log('[turn] llaves de Cloudflare desde el vault: TURN habilitado');
-            else log('[vault] configuración recibida sin TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN sigue apagado');
+            if (turnIssuer.enabled) log('[turn] Cloudflare keys from the vault: TURN enabled');
+            else log('[vault] config received without TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN stays off');
             // La federación también sale de la bóveda: si los peers vinieron ahí
             // (y no en el `.env`), esta llamada es la que la levanta.
-            try { applyFederationConfig(log); } catch (e) { log('[fed] no se pudo aplicar la configuración de la bóveda: ' + e.message); }
+            try { applyFederationConfig(log); } catch (e) { log('[fed] could not apply the vault config: ' + e.message); }
             vaultPending = null;   // lo que acaba de llegar YA está aplicado
         },
         onPending: ({ reason, ts }) => {
@@ -1734,7 +1734,7 @@ function startVaultSecretsLoop(log = console.log) {
         }
     });
     if (vaultSecretsHandle.enabled) {
-        log('[vault] proxy enrolado: esperando la configuración del vault (el transporte ya corre)');
+        log('[vault] proxy enrolled: waiting for the vault config (the transport is already running)');
     }
 }
 
@@ -1825,7 +1825,7 @@ wss.on('connection', (ws, req) => {
     // vida la decide la rotación de pm2 y no una política, y donde nadie la mira nunca.
     // Para diagnosticar basta el token, que es efímero y no señala a una persona
     // (dueño, 2026-09-02, al escribir el mapa de flujos de datos).
-    if (process.env.NODE_ENV !== 'test') console.log(`Cliente conectado - Token: ${token}. Total activos: ${activeConnections.size}`);
+    if (process.env.NODE_ENV !== 'test') console.log(`[proxy] client connected · token ${token} · ${activeConnections.size} active`);
     
     // Manejar mensajes recibidos
     ws.on('message', (data) => {
@@ -2073,7 +2073,7 @@ wss.on('connection', (ws, req) => {
             }
             
         } catch (error) {
-            console.error('Error procesando mensaje:', error);
+            console.error('[proxy] error processing message:', error);
             ws.send(JSON.stringify({
                 type: 'error',
                 code: 'bad-json', error: 'could not process the message: invalid JSON'
@@ -2142,7 +2142,7 @@ wss.on('connection', (ws, req) => {
 
         ws.send(JSON.stringify(response));
 
-        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} publicado en canal: ${channelName}. Notificados ${notifiedJoin} miembros.`);
+        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} published in ${channelName} · notified ${notifiedJoin} member(s)`);
     }
     
     function handleUnpublishMessage(ws, message) {
@@ -2185,7 +2185,7 @@ wss.on('connection', (ws, req) => {
         applyMessageIds(response, message);
         ws.send(JSON.stringify(response));
 
-        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} despublicado del canal: ${channelName}. Notificados ${notifiedLeave} miembros.`);
+        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} unpublished from ${channelName} · notified ${notifiedLeave} member(s)`);
     }
     
     function handleListMessage(ws, message) {
@@ -2236,7 +2236,7 @@ wss.on('connection', (ws, req) => {
         
         ws.send(JSON.stringify(response));
         
-        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} solicitó lista del canal ${channelName}: ${tokens.length} tokens`);
+        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} listed ${channelName}: ${tokens.length} token(s)`);
     }
 
     // Observar un canal (read-only): registra interés en sus eventos joined/left/
@@ -2267,7 +2267,7 @@ wss.on('connection', (ws, req) => {
         const response = { type: 'watched', channel: channelName, tokens, count: tokens.length, timestamp: new Date().toISOString() };
         applyMessageIds(response, message);
         ws.send(JSON.stringify(response));
-        if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} observa el canal ${channelName} (${tokens.length} tokens)`);
+        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} watches ${channelName} (${tokens.length} token(s))`);
     }
 
     function handleUnwatchMessage(ws, message) {
@@ -2406,7 +2406,7 @@ wss.on('connection', (ws, req) => {
             
             ws.send(JSON.stringify(response));
             
-            if (process.env.NODE_ENV !== 'test') console.log(`Cliente ${token} desconectó manualmente de ${targetToken}`);
+            if (process.env.NODE_ENV !== 'test') console.log(`[proxy] ${token} manually disconnected from ${targetToken}`);
         } else {
             const errorResponse = {
                 type: 'error',
@@ -2562,7 +2562,7 @@ wss.on('connection', (ws, req) => {
                 // Una línea por llave, no una por identify: reconectar es normal y no hace
                 // falta repetirlo. Lo que se quiere saber es QUIÉN falta por actualizar.
                 if (n === 1) {
-                    console.warn(`[proxy] identify sin destinatario (aud) de ${String(data.publickey).slice(0, 60)}… — cliente por actualizar a @dotrino/proxy-client >= 0.18`);
+                    console.warn(`[proxy] identify without an audience (aud) from ${String(data.publickey).slice(0, 60)}… — client needs @dotrino/proxy-client >= 0.18`);
                 }
             }
             let pubKeyJwk;
@@ -2977,7 +2977,7 @@ wss.on('connection', (ws, req) => {
                 // Colisión real o un nodo mintiendo. En los dos casos la respuesta
                 // correcta es la misma: no adivinar.
                 response = { type: 'pair-redeem', ok: false, code: 'ambiguous-code', error: 'ambiguous code: ask for a new one' };
-                console.warn(`[pair] código ambiguo (${pending.respuestas.length} nodos dicen tenerlo) — filtro ${hint}`);
+                console.warn(`[pair] ambiguous code (${pending.respuestas.length} nodes claim it) — filter ${hint}`);
             } else {
                 response = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid or already used code' };
             }
@@ -3144,13 +3144,13 @@ wss.on('connection', (ws, req) => {
             // Remover de los canales que observaba (read-only)
             removeFromAllWatchers(token);
 
-            if (process.env.NODE_ENV !== 'test') console.log(`Cliente desconectado - Token: ${token}. Notificados: ${notifiedByChannels.size} por canal + ${notifiedByPairs} por par. Total activos: ${activeConnections.size}`);
+            if (process.env.NODE_ENV !== 'test') console.log(`[proxy] client disconnected · token ${token} · notified ${notifiedByChannels.size} by channel + ${notifiedByPairs} by pair · ${activeConnections.size} active`);
         }
     });
     
     // Manejar errores en la conexión
     ws.on('error', (error) => {
-        console.error(`Error en WebSocket para token ${token}:`, error);
+        console.error(`[proxy] WebSocket error for token ${token}:`, error);
     });
 });
 
@@ -3202,7 +3202,7 @@ async function start(port = Number(PORT)) {
                 persist.deleteExpiredHomes(cutoff);
                 homePubkeys.clear();
                 for (const pk of persist.loadHomes(cutoff)) homePubkeys.add(pk);
-            } catch (e) { console.warn('[fed] purga de homes falló:', e.message); }
+            } catch (e) { console.warn('[fed] homes purge failed:', e.message); }
             try {
                 const cutoffEnc = Date.now() - ENCPUB_TTL_MS;
                 persist.deleteExpiredEncPubs(cutoffEnc);
@@ -3211,7 +3211,7 @@ async function start(port = Number(PORT)) {
                     try { encPubs.set(fila.pubkey, { data: JSON.parse(fila.data), signature: fila.signature, ts: fila.ts }); }
                     catch (_) {}
                 }
-            } catch (e) { console.warn('[encpub] purga falló:', e.message); }
+            } catch (e) { console.warn('[encpub] purge failed:', e.message); }
         }, 60 * 60 * 1000).unref();
         startFederation();
 
@@ -3229,16 +3229,16 @@ async function start(port = Number(PORT)) {
             const actualPort = server.address().port;
             if (process.env.NODE_ENV !== 'test') {
                 console.log(`=========================================`);
-                console.log(`🚀 Servidor WebSocket proxy simplificado iniciado`);
-                console.log(`📡 Puerto: ${actualPort}`);
+                console.log(`🚀 WebSocket proxy started`);
+                console.log(`📡 Port: ${actualPort}`);
                 console.log(`🌐 URL: ws://localhost:${actualPort}/`);
-                console.log(`📊 Total conexiones activas: 0`);
+                console.log(`📊 Active connections: 0`);
                 console.log(`=========================================`);
                 console.log(`⏰ ${new Date().toLocaleString()}`);
                 console.log(`=========================================`);
                 // Secretos del vault (TURN): DESPUÉS de escuchar — el transporte
                 // nunca espera al vault; solo la feature. En tests no aplica.
-                try { startVaultSecretsLoop(); } catch (e) { console.error('[vault] no se pudo iniciar la carga de secretos:', e.message); }
+                try { startVaultSecretsLoop(); } catch (e) { console.error('[vault] could not start loading secrets:', e.message); }
             }
             resolve(actualPort);
         });
@@ -3310,10 +3310,10 @@ function stop() {
 if (require.main === module) {
     start().catch((err) => {
         if (err.code === 'EADDRINUSE') {
-            console.error(`Error: El puerto ${Number(PORT)} ya está en uso.`);
-            console.error(`   Puedes cambiar el puerto en el archivo .env o liberar el puerto.`);
+            console.error(`Error: port ${Number(PORT)} is already in use.`);
+            console.error(`   Change the port in .env or free it.`);
         } else {
-            console.error(`Error al iniciar servidor:`, err);
+            console.error(`Error starting the server:`, err);
         }
         process.exit(1);
     });
@@ -3349,8 +3349,8 @@ function gracefulShutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('\n=========================================');
-    console.log(`Recibida señal ${signal}`);
-    console.log(`Cerrando ${activeConnections.size} conexiones activas...`);
+    console.log(`Received signal ${signal}`);
+    console.log(`Closing ${activeConnections.size} active connection(s)...`);
 
     // Avisar la baja a los peers ANTES de cerrar. Esto era imposible: la función
     // cerraba los sockets y llamaba a process.exit(0) en la línea siguiente, de
@@ -3368,7 +3368,7 @@ function gracefulShutdown(signal) {
     // "esperar a que todo termine": es no matar el proceso en el mismo tick.
     const grace = setTimeout(() => {
         try { mesh.stop(); } catch (_) {}
-        console.log('Servidor cerrado correctamente');
+        console.log('Server closed cleanly');
         console.log('=========================================');
         process.exit(0);
     }, Number(process.env.PROXY_SHUTDOWN_GRACE_MS || 250));
