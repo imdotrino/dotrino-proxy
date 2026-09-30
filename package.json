@@ -1,6 +1,6 @@
 {
   "name": "websocket-proxy",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "WebSocket proxy with UUID validation using ws ",
   "main": "server.js",
   "scripts": {
