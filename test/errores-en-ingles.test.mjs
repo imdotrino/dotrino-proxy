@@ -10,7 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const raiz = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
-const ESPAÑOL = /[áéíóúñ¿¡]|\b(inválid[oa]|código|nodo|canal|firma|formato|destinatarios?|pareados|caducado|sin|desconocid[oa])\b/i
+const ESPAÑOL = /[áéíóúñ¿¡]|\b(inválid[oa]|código|nodo|canal|firma|formato|destinatarios?|pareados|caducado|sin|desconocid[oa]|habilitad[oa]|deshabilitad[oa]|enviando|timbre|recibid[oa]|cliente|conectad[oa]|desde|para|cola|llave|mensaje|esperando|reintento)\b/i
 
 describe('respuestas del proxio', () => {
   for (const archivo of ['server.js', 'pairingCodes.js']) {

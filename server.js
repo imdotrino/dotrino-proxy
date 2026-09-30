@@ -667,7 +667,7 @@ function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ep
             queuedAt: queuedAt || Date.now(),
             expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes
         });
-        if (!quiet) ringPush(toPubkey);
+        if (!quiet) ringPush(toPubkey, approvalHint(msgBody));
         return { queued: true };
     }
     return { dropped: true };
@@ -964,7 +964,7 @@ const VAPID_PRIVATE_KEY = _vapid.privateKey;
 const pushEnabled = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (pushEnabled) {
     webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-    console.log(`[push] Web Push habilitado (VAPID ${_vapid.source}).`);
+    console.log(`[push] Web Push enabled (VAPID ${_vapid.source}).`);
     console.log(fcmEnabled() ? '[push] FCM enabled (service account from FCM_SERVICE_ACCOUNT_B64).' : '[push] FCM off: no FCM_SERVICE_ACCOUNT_B64 (native app will not be rung).');
     console.log(apnsEnabled() ? '[push] APNs enabled (APNS_KEY_B64/APNS_KEY_ID/APNS_TEAM_ID).' : '[push] APNs off: no APNS_KEY_B64/APNS_KEY_ID/APNS_TEAM_ID (iOS apps will not be rung).');
 } else {
@@ -987,22 +987,46 @@ function removePushSubscription(pubkey) {
     if (pushSubscriptions.delete(pubkey)) persist.deletePushSubscription(pubkey);
 }
 
-// Dispara el "timbre" (sin contenido). Best-effort: si la subscription está
-// muerta (404/410) la borramos; el mensaje ya quedó encolado de todos modos.
+/**
+ * EL PORQUÉ DE UN PEDIDO DE APROBACIÓN, para el timbre del NAVEGADOR (dueño, 2026-09-30: «es
+ * importante que se sepa el porqué de la notificación»; «la aprobación no debe ser exclusiva
+ * del teléfono»). Si lo que se encola es el aviso de la bóveda de que hay un pedido
+ * (`vault.admin.event` con `ev: 'approval'`), se saca de su cuerpo QUÉ se pide y QUIÉN: tipo,
+ * cajón, nombre y id del aparato. Es lo que este proxio ya ve —ese cuerpo va firmado, no
+ * sellado— y el Web Push viaja cifrado hasta el navegador (RFC 8291): el servicio de push no lo
+ * lee. A FCM y APNs NO se manda: esos sí los leen Google y Apple (ver `ringPush`).
+ *
+ * Es una pista para el aviso, no una decisión: quien aprueba lo hace en la consola, con el
+ * pedido verificado contra la bóveda.
+ */
+function approvalHint(msgBody) {
+    let m = msgBody;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch (_) { return null; } }
+    const b = m && m.type === 'vault.admin.event' ? m.body : null;
+    if (!b || b.ev !== 'approval') return null;
+    const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
+    return { why: { ev: 'approval', kind: str(b.kind, 20) || 'read', ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
+}
+
+// Dispara el "timbre". Best-effort: si la subscription está muerta (404/410) la
+// borramos; el mensaje ya quedó encolado de todos modos.
 function ringPush(pubkey, extra) {
     const sub = pushSubscriptions.get(pubkey);
     if (!sub) return;
     const ring = { type: 'ring', ts: Date.now(), ...(extra || {}) };
+    // Lo que sabe del pedido (`why`) SOLO viaja por Web Push, que va cifrado hasta el
+    // navegador. FCM y APNs lo leen Google y Apple: a ellos, el timbre vacío de siempre.
+    const bare = { ...ring }; delete bare.why;
     // App nativa (FCM): la suscripción es `{ kind:'fcm', token }`, no una PushSubscription.
     if (sub.kind === 'fcm') {
-        ringFcm(sub.token, ring).then((r) => {
+        ringFcm(sub.token, bare).then((r) => {
             if (r.gone) { removePushSubscription(pubkey); console.log('[push] fcm token gone: subscription removed'); }
             else if (!r.ok && !r.disabled) console.error('[push] fcm error:', r.status, r.body);
         }).catch((e) => console.error('[push] fcm error:', e.message));
         return;
     }
     if (sub.kind === 'apns') {
-        ringApns(sub, ring).then((r) => {
+        ringApns(sub, bare).then((r) => {
             if (r.gone) { removePushSubscription(pubkey); console.log('[push] apns token gone: subscription removed'); }
             else if (!r.ok && !r.disabled) console.error('[push] apns error:', r.status, r.body);
         }).catch((e) => console.error('[push] apns error:', e.message));
@@ -1017,7 +1041,7 @@ function ringPush(pubkey, extra) {
                 removePushSubscription(pubkey);
                 console.log(`[push] expired subscription (${code}) deleted for a pubkey`);
             } else {
-                console.error('[push] error enviando timbre:', code || err.message);
+                console.error('[push] error sending the ring:', code || err.message);
             }
         });
 }
@@ -3066,7 +3090,7 @@ wss.on('connection', (ws, req) => {
                 } else {
                     const bytes = bytesOfMessage(message.message);
                     enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes });
-                    if (!quiet) ringPush(pk);
+                    if (!quiet) ringPush(pk, approvalHint(message.message));
                     queued.push(pk);
                 }
             } else if (ephemeral) {
@@ -3086,7 +3110,7 @@ wss.on('connection', (ws, req) => {
                 queued.push(pk);
                 // Timbre push (sin contenido): despierta al SW del destinatario
                 // para que reconecte y baje su cola. Best-effort.
-                if (!quiet) ringPush(pk);
+                if (!quiet) ringPush(pk, approvalHint(message.message));
             }
         }
         if (queued.length || failed.length || dropped.length) {
@@ -3338,7 +3362,7 @@ function setTurnIssuer(newIssuer) {
 // `applyFederationConfig` sale aquí por lo mismo que `setTurnIssuer`: es la costura
 // por donde entra la configuración de la bóveda, y probarla de verdad exige poder
 // llamarla con el servidor ya escuchando (que es justo cuando llega el bundle).
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, puedeSellar };
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, puedeSellar, _approvalHint: approvalHint };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el
