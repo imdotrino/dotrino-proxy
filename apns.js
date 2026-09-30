@@ -59,10 +59,16 @@ function session(env) {
     return n;
 }
 
+// EL TRINO: uno de siete al azar. Los archivos los instala `DotrinoPush` (dotrino-native) en
+// `Library/Sounds` de cada app; si a una le faltan, iOS usa el sonido por defecto. Si cambia el
+// número, cambia también `DotrinoPush.ringCount`.
+const RINGS = 7;
+const ringName = () => `dotrino-ring-${1 + crypto.randomInt(RINGS)}.caf`;
+
 /** Lo que Apple recibe: una alerta localizada en el teléfono y el timbre, nada más. */
 function apnsBody(payload) {
     return JSON.stringify({
-        aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: 'default' },
+        aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: ringName() },
         ...(payload || {}),
     });
 }

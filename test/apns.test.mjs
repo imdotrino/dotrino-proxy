@@ -24,6 +24,8 @@ describe('apns', () => {
         expect(b.aps.alert).toEqual({ 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' });
         expect(b.type).toBe('ring');
         expect(b.aps['content-available']).toBeUndefined();
+        // Un trino al azar, de los siete que instala DotrinoPush.
+        expect(b.aps.sound).toMatch(/^dotrino-ring-[1-7]\.caf$/);
     });
 
     it('firma el JWT del proveedor con ES256 y el kid/iss correctos', () => {
