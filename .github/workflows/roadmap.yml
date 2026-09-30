@@ -1,0 +1,26 @@
+# EL REGISTRO DE COMPATIBILIDAD, EN CADA PUSH (dotrino-roadmap, CONVENCIONES §14).
+#
+# El proxio se despliega por webhook (dotrino-deploy-listener), no desde aquí, así que esto
+# no frena el despliegue: deja el commit en ROJO si algo instalado está marcado roto o por
+# debajo de lo que exige su ficha. Corrió meses con @dotrino/vault 0.52, marcada rota, sin
+# que nada lo dijera (2026-09-30).
+name: Roadmap
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      # Solo lee el package-lock.json: no hace falta instalar nada.
+      - run: npx --yes @dotrino/roadmap@latest check --product proxy
