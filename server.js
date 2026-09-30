@@ -3332,6 +3332,8 @@ function stop() {
 
 // Auto-start solo cuando se ejecuta directamente (no cuando se importa desde tests)
 if (require.main === module) {
+    // §15: una vez al día, si sus pilares tienen versión nueva, lo dice en el log.
+    require('./updateWatch').startUpdateWatch().catch((e) => console.error('[update] could not start the watch:', e.message));
     start().catch((err) => {
         if (err.code === 'EADDRINUSE') {
             console.error(`Error: port ${Number(PORT)} is already in use.`);
