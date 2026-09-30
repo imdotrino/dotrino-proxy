@@ -65,10 +65,17 @@ function session(env) {
 const RINGS = 7;
 const ringName = () => `dotrino-ring-${1 + crypto.randomInt(RINGS)}.caf`;
 
-/** Lo que Apple recibe: una alerta localizada en el teléfono y el timbre, nada más. */
+/**
+ * Lo que Apple recibe: una alerta localizada en el teléfono y el timbre, nada más.
+ *
+ * `mutable-content: 1` deja que la extensión de notificaciones de la app (si la tiene) baje el
+ * pedido ella misma y reescriba el texto con el PORQUÉ («proxy1 pide sus claves»). Apple sigue
+ * sin ver nada: el motivo se busca en el teléfono, sellado, y aquí no viaja. Sin extensión, iOS
+ * enseña la alerta de siempre.
+ */
 function apnsBody(payload) {
     return JSON.stringify({
-        aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: ringName() },
+        aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: ringName(), 'mutable-content': 1 },
         ...(payload || {}),
     });
 }

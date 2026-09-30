@@ -26,6 +26,8 @@ describe('apns', () => {
         expect(b.aps['content-available']).toBeUndefined();
         // Un trino al azar, de los siete que instala DotrinoPush.
         expect(b.aps.sound).toMatch(/^dotrino-ring-[1-7]\.caf$/);
+        // La extensión de la app puede reescribir el texto con el porqué, buscado en el teléfono.
+        expect(b.aps['mutable-content']).toBe(1);
     });
 
     it('firma el JWT del proveedor con ES256 y el kid/iss correctos', () => {
