@@ -126,9 +126,9 @@ const mesh = new Mesh({
     log: (...a) => console.log(...a),
     onDeliver: (payload) => {
         try {
-            const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet } = payload || {};
+            const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = payload || {};
             if (typeof toPubkey !== 'string' || message === undefined) return;
-            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true);
+            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
         } catch (e) { console.warn('[mesh] federated delivery failed:', e.message); }
     },
     // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
@@ -602,7 +602,7 @@ function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(p
 // El sobre va FIRMADO con la llave de este nodo: el receptor sabe quién se lo
 // mandó sin que haya ningún secreto compartido de por medio. `ts` + `nonce`
 // cierran el replay (una trama capturada no se puede reenviar indefinidamente).
-function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false) {
+function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false, app = null) {
     if (!PROXY_PEERS.length) return;
     if (!nodeIdentity) return;  // sin identidad no se puede firmar → no se federa
 
@@ -618,7 +618,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
     if (mesh.hasLinks()) {
         // Un efímero NO se guarda para reenviar: si el enlace está caído, para
         // cuando vuelva ya no sirve. Se intenta ahora o no se intenta.
-        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet }, { retain: !ephemeral });
+        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet, app }, { retain: !ephemeral });
         return;
     }
 
@@ -628,7 +628,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
         from: nodeIdentity.pubkey,
         ts: Date.now(),
         nonce: nodeIdentityLib.newNonce(),
-        toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet
+        toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet, app
     };
     const payload = JSON.stringify({ body, signature: nodeIdentityLib.signBody(nodeIdentity, body) });
     for (const peer of PROXY_PEERS) {
@@ -644,13 +644,13 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
 
 // Aplica un mensaje federado recibido de un peer: entrega a instancias locales,
 // o encola SÓLO si este proxy es el home del destinatario. NO re-reenvía (sin loops).
-function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false) {
+function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false, app = null) {
     const set = pubkeyToTokens.get(toPubkey);
     let delivered = 0;
     if (set) {
         for (const tk of set) {
             const conn = activeConnections.get(tk);
-            if (!conn) continue;
+            if (!conn || !appMatches(conn.app, app)) continue;
             try {
                 conn.ws.send(JSON.stringify({ type: 'message', from: null, from_publickey: fromPubkey, message: msgBody }));
                 delivered++;
@@ -665,9 +665,9 @@ function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ep
         enqueueOffline(toPubkey, {
             from: null, fromPubkey, message: msgBody,
             queuedAt: queuedAt || Date.now(),
-            expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes
+            expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes, app
         });
-        if (!quiet) ringPush(toPubkey, approvalHint(msgBody));
+        if (!quiet) ringPush(toPubkey, app, approvalHint(msgBody));
         return { queued: true };
     }
     return { dropped: true };
@@ -746,13 +746,20 @@ function enqueueOffline(recipientPubkey, queued) {
     evictGloballyIfOverCap();
 }
 
-function flushOfflineFor(pubkey, ws) {
+/**
+ * Entrega la cola de `pubkey` a esta conexión. Con `app`, solo lo que es para esa app (o lo
+ * que no dijo para cuál); lo de las otras apps de la misma llave se queda esperando a su dueña.
+ */
+function flushOfflineFor(pubkey, ws, app = null) {
     const q = offlineQueues.get(pubkey);
     if (!q || q.length === 0) return 0;
     const now = Date.now();
     let delivered = 0;
+    const keep = [];
+    const doneIds = [];
     for (const item of q) {
-        if (item.expiresAt < now) continue;
+        if (item.expiresAt < now) { totalQueueBytes -= item.bytes || 0; if (item.id != null) doneIds.push(item.id); continue; }
+        if (!appMatches(app, item.app)) { keep.push(item); continue; }
         try {
             ws.send(JSON.stringify({
                 type: 'message',
@@ -763,14 +770,17 @@ function flushOfflineFor(pubkey, ws) {
                 queued_at: new Date(item.queuedAt).toISOString()
             }));
             delivered++;
-        } catch (_) { /* ws not writable, give up — keep queue for next time */
+        } catch (_) { /* ws not writable, give up — keep the rest for next time */
+            persist.deleteQueuedByIds(doneIds);
+            const rest = q.filter((x) => !doneIds.includes(x.id));
+            if (rest.length) offlineQueues.set(pubkey, rest); else offlineQueues.delete(pubkey);
             return delivered;
         }
         totalQueueBytes -= item.bytes || 0;
+        if (item.id != null) doneIds.push(item.id);
     }
-    // Entregada (o expirada) toda la cola de esta pubkey: borrar de RAM y disco.
-    offlineQueues.delete(pubkey);
-    persist.deleteQueuedForPubkey(pubkey);
+    persist.deleteQueuedByIds(doneIds);
+    if (keep.length) offlineQueues.set(pubkey, keep); else offlineQueues.delete(pubkey);
     return delivered;
 }
 
@@ -971,20 +981,46 @@ if (pushEnabled) {
     console.warn('[push] VAPID unavailable: push ringing is disabled (the offline queue keeps working).');
 }
 
-// publickey JWK string -> PushSubscription. Working set en RAM, respaldado en
+/**
+ * EL TIMBRE ES DIRIGIDO A UNA APP (dueño, 2026-09-30: «el timbre, si bien no sabe el
+ * contenido, sí debería ser dirigido»).
+ *
+ * En un teléfono varias apps hablan con la MISMA llave (el perfil del teléfono, CONVENCIONES
+ * §16.2). Con una suscripción por llave, la última app en registrarse se llevaba todos los
+ * timbres y la primera en conectarse vaciaba la cola de todas: messenger avisaba «tienes un
+ * mensaje» con los pedidos de la bóveda y con cualquier ping, y al abrirlo no había nada.
+ *
+ * `app` es un dato de RUTEO, como la pubkey: dice a qué app va, nunca qué lleva.
+ *   · quien envía lo marca (`message.app`), y el timbre suena solo en esa app;
+ *   · quien se suscribe o se identifica dice qué app es, y baja solo lo suyo;
+ *   · SIN app (clientes y emisores que aún no lo dicen) es «todas», que es lo que pasaba
+ *     antes. No es un repliegue: es lo que significa no decir a quién va.
+ */
+const APP_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const appOf = (v) => (typeof v === 'string' && APP_RE.test(v) ? v : null);
+/** ¿Le toca a quien es `have` (app de la suscripción/conexión) lo que va para `want`? */
+const appMatches = (have, want) => !have || !want || have === want;
+
+// publickey -> Map(app -> PushSubscription); app '' = no dijo cuál. En RAM, respaldado en
 // SQLite (write-through). Rehidratado al arrancar.
 const pushSubscriptions = persist.loadPushSubscriptions();
 if (pushSubscriptions.size) {
-    console.log(`[push] rehydrated ${pushSubscriptions.size} subscription(s) from SQLite`);
+    console.log(`[push] rehydrated ${[...pushSubscriptions.values()].reduce((n, m) => n + m.size, 0)} subscription(s) from SQLite`);
 }
 
-function setPushSubscription(pubkey, subscription) {
-    pushSubscriptions.set(pubkey, subscription);
-    persist.upsertPushSubscription(pubkey, subscription);
+function setPushSubscription(pubkey, app, subscription) {
+    if (!pushSubscriptions.has(pubkey)) pushSubscriptions.set(pubkey, new Map());
+    pushSubscriptions.get(pubkey).set(app || '', subscription);
+    persist.upsertPushSubscription(pubkey, app || '', subscription);
 }
 
-function removePushSubscription(pubkey) {
-    if (pushSubscriptions.delete(pubkey)) persist.deletePushSubscription(pubkey);
+// Sin `app` (undefined): todas las de esa llave. Con app: solo esa.
+function removePushSubscription(pubkey, app) {
+    const subs = pushSubscriptions.get(pubkey);
+    if (!subs) return;
+    if (app === undefined) subs.clear(); else subs.delete(app || '');
+    if (!subs.size) pushSubscriptions.delete(pubkey);
+    persist.deletePushSubscription(pubkey, app);
 }
 
 /**
@@ -1010,9 +1046,15 @@ function approvalHint(msgBody) {
 
 // Dispara el "timbre". Best-effort: si la subscription está muerta (404/410) la
 // borramos; el mensaje ya quedó encolado de todos modos.
-function ringPush(pubkey, extra) {
-    const sub = pushSubscriptions.get(pubkey);
-    if (!sub) return;
+function ringPush(pubkey, app, extra) {
+    const subs = pushSubscriptions.get(pubkey);
+    if (!subs) return;
+    for (const [subApp, sub] of subs) {
+        if (appMatches(subApp, app)) ringOne(pubkey, subApp, sub, extra);
+    }
+}
+
+function ringOne(pubkey, subApp, sub, extra) {
     const ring = { type: 'ring', ts: Date.now(), ...(extra || {}) };
     // Lo que sabe del pedido (`why`) SOLO viaja por Web Push, que va cifrado hasta el
     // navegador. FCM y APNs lo leen Google y Apple: a ellos, el timbre vacío de siempre.
@@ -1020,14 +1062,14 @@ function ringPush(pubkey, extra) {
     // App nativa (FCM): la suscripción es `{ kind:'fcm', token }`, no una PushSubscription.
     if (sub.kind === 'fcm') {
         ringFcm(sub.token, bare).then((r) => {
-            if (r.gone) { removePushSubscription(pubkey); console.log('[push] fcm token gone: subscription removed'); }
+            if (r.gone) { removePushSubscription(pubkey, subApp); console.log('[push] fcm token gone: subscription removed'); }
             else if (!r.ok && !r.disabled) console.error('[push] fcm error:', r.status, r.body);
         }).catch((e) => console.error('[push] fcm error:', e.message));
         return;
     }
     if (sub.kind === 'apns') {
         ringApns(sub, bare).then((r) => {
-            if (r.gone) { removePushSubscription(pubkey); console.log('[push] apns token gone: subscription removed'); }
+            if (r.gone) { removePushSubscription(pubkey, subApp); console.log('[push] apns token gone: subscription removed'); }
             else if (!r.ok && !r.disabled) console.error('[push] apns error:', r.status, r.body);
         }).catch((e) => console.error('[push] apns error:', e.message));
         return;
@@ -1038,7 +1080,7 @@ function ringPush(pubkey, extra) {
         .catch((err) => {
             const code = err && err.statusCode;
             if (code === 404 || code === 410) {
-                removePushSubscription(pubkey);
+                removePushSubscription(pubkey, subApp);
                 console.log(`[push] expired subscription (${code}) deleted for a pubkey`);
             } else {
                 console.error('[push] error sending the ring:', code || err.message);
@@ -1092,7 +1134,7 @@ function runScheduledPushes() {
     for (const job of due) {
         let extra;
         try { extra = job.payload ? JSON.parse(job.payload) : undefined; } catch (_) { extra = undefined; }
-        ringPush(job.pubkey, extra);
+        ringPush(job.pubkey, null, extra);   // un recordatorio propio: a todas sus apps
         if (job.cron) {
             const next = cronNextFire(job.cron, job.tz, now);
             if (next) persist.updateScheduledPushNextFire(job.id, next);
@@ -1682,9 +1724,9 @@ const server = http.createServer((req, res) => {
                 const check = verifyPeerEnvelope(envelope);
                 if (!check.ok) { res.writeHead(401, { 'content-type': 'application/json' });
                     res.end(JSON.stringify({ error: check.reason })); return; }
-                const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet } = check.body;
+                const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = check.body;
                 if (typeof toPubkey !== 'string' || message === undefined) { res.writeHead(400); res.end(); return; }
-                const r = deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true);
+                const r = deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
                 res.writeHead(200, { 'content-type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, ...r }));
             } catch (_) { res.writeHead(400); res.end(); }
@@ -2620,6 +2662,12 @@ wss.on('connection', (ws, req) => {
                 !pubkeyToTokens.has(data.publickey) ||
                 pubkeyToTokens.get(data.publickey).size === 0;
             bindPubkey(data.publickey, ws.token);
+            // QUÉ APP ES (fuera de lo firmado: es ruteo, y quien tiene la llave ya puede leerlo
+            // todo). Con app, baja SU parte de la cola aunque la llave ya estuviera conectada en
+            // otra app del mismo aparato; sin app, como siempre: solo la primera instancia.
+            const connApp = appOf(message.app);
+            const selfConn = activeConnections.get(ws.token);
+            if (selfConn) selfConn.app = connApp;
             // Federación: este proxy queda registrado como "home" de esta pubkey
             // (persistente con TTL), para encolar sus mensajes federados offline.
             registerHome(data.publickey);
@@ -2636,7 +2684,7 @@ wss.on('connection', (ws, req) => {
                 bindExtraPubkey(master, ws.token);
                 registerHome(master);
                 masterBound = master;
-                if (masterWasFirst) masterDelivered = flushOfflineFor(master, ws);
+                if (masterWasFirst || connApp) masterDelivered = flushOfflineFor(master, ws, connApp);
             }
 
             // Acta de perfil: bindea también el `profileId` (la PERSONA), de modo que un
@@ -2649,12 +2697,12 @@ wss.on('connection', (ws, req) => {
                 bindExtraPubkey(profileId, ws.token);
                 registerHome(profileId);
                 profileBound = profileId;
-                if (profileWasFirst) profileDelivered = flushOfflineFor(profileId, ws);
+                if (profileWasFirst || connApp) profileDelivered = flushOfflineFor(profileId, ws, connApp);
             } else if (profileId) {
                 profileBound = profileId;
             }
 
-            const delivered = wasFirstInstance ? flushOfflineFor(data.publickey, ws) : 0;
+            const delivered = (wasFirstInstance || connApp) ? flushOfflineFor(data.publickey, ws, connApp) : 0;
             const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered + profileDelivered, master: masterBound, profile: profileBound };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
@@ -2717,8 +2765,10 @@ wss.on('connection', (ws, req) => {
             }
             if (isFcm) subscription = { kind: 'fcm', token: subscription.token };
             if (apns) subscription = apns;
-            setPushSubscription(data.publickey, subscription);
-            const response = { type: 'push-subscribed', publickey: data.publickey };
+            // `data.app` va DENTRO de lo firmado: dice qué app de este aparato recibe el timbre.
+            const subApp = appOf(data.app);
+            setPushSubscription(data.publickey, subApp, subscription);
+            const response = { type: 'push-subscribed', publickey: data.publickey, app: subApp };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
         } catch (e) {
@@ -2751,7 +2801,8 @@ wss.on('connection', (ws, req) => {
                 const e = { type: 'error', code: 'bad-signature', error: 'invalid push-unsubscribe signature' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
-            removePushSubscription(data.publickey);
+            // Con `app`, solo la de esa app; sin ella (cliente viejo), todas las de la llave.
+            removePushSubscription(data.publickey, data.app === undefined ? undefined : appOf(data.app));
             const response = { type: 'push-unsubscribed', publickey: data.publickey };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
@@ -3038,6 +3089,8 @@ wss.on('connection', (ws, req) => {
         // algo cambió). Sin esto, cada aviso de la bóveda hacía sonar el teléfono con
         // «alguien pide tus claves», y al abrir no había ningún pedido.
         const quiet = message.quiet === true;
+        // A QUÉ APP va (ruteo, ver `appOf`). Sin app: a todas las de esa llave.
+        const app = appOf(message.app);
         const expiresAt = now + OFFLINE_TTL_MS;
         const sentInline = [];
         const queued = [];
@@ -3054,7 +3107,10 @@ wss.on('connection', (ws, req) => {
             if (targetTokens) {
                 for (const t of targetTokens) {
                     const conn = activeConnections.get(t);
-                    if (conn) liveConns.push({ token: t, conn });
+                    // Solo las conexiones de ESA app (o las que no dijeron cuál): si la app
+                    // destino no está abierta, el mensaje se encola para ella aunque otra app
+                    // del mismo aparato esté conectada.
+                    if (conn && appMatches(conn.app, app)) liveConns.push({ token: t, conn });
                 }
             }
             if (liveConns.length > 0) {
@@ -3082,15 +3138,15 @@ wss.on('connection', (ws, req) => {
                 // el home aún no se conoce (la app dedup por `mid`). El receptor
                 // federado, en cambio, solo encola si es home (evita acumular en
                 // proxies intermedios).
-                forwardToPeers(pk, message.message, senderPubkey, now, expiresAt, ephemeral, quiet);
+                forwardToPeers(pk, message.message, senderPubkey, now, expiresAt, ephemeral, quiet, app);
                 if (ephemeral) {
                     // Se intenta la entrega en vivo por la malla, pero no se guarda
                     // nada: si el destinatario no está, se perdió y punto.
                     dropped.push(pk);
                 } else {
                     const bytes = bytesOfMessage(message.message);
-                    enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes });
-                    if (!quiet) ringPush(pk, approvalHint(message.message));
+                    enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes, app });
+                    if (!quiet) ringPush(pk, app, approvalHint(message.message));
                     queued.push(pk);
                 }
             } else if (ephemeral) {
@@ -3105,12 +3161,13 @@ wss.on('connection', (ws, req) => {
                     message: message.message,
                     queuedAt: now,
                     expiresAt,
-                    bytes
+                    bytes,
+                    app
                 });
                 queued.push(pk);
-                // Timbre push (sin contenido): despierta al SW del destinatario
+                // Timbre push (sin contenido): despierta a la app destinataria
                 // para que reconecte y baje su cola. Best-effort.
-                if (!quiet) ringPush(pk, approvalHint(message.message));
+                if (!quiet) ringPush(pk, app, approvalHint(message.message));
             }
         }
         if (queued.length || failed.length || dropped.length) {

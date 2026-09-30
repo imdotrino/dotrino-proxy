@@ -26,9 +26,11 @@ function init(dbFile) {
             value TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS push_subscriptions (
-            pubkey       TEXT PRIMARY KEY,
+            pubkey       TEXT NOT NULL,
+            app          TEXT NOT NULL DEFAULT '',
             subscription TEXT NOT NULL,
-            updated_at   INTEGER NOT NULL
+            updated_at   INTEGER NOT NULL,
+            PRIMARY KEY (pubkey, app)
         );
         CREATE TABLE IF NOT EXISTS offline_queue (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +85,31 @@ function init(dbFile) {
     // llave. No se migra el contenido: arrastrarlo sería seguir confiando justo
     // en lo que dejó de valer, y los pineos se rehacen solos en el siguiente
     // descubrimiento (segundos).
+    // EL TIMBRE ES POR APP (dueño, 2026-09-30: «el timbre, si bien no sabe el contenido, sí
+    // debería ser dirigido»). En un teléfono varias apps comparten la llave del perfil, y con
+    // una suscripción por llave la última que se registraba se llevaba todos los timbres:
+    // messenger sonaba con los pedidos de la bóveda y con cualquier ping. Ahora la clave es
+    // (llave, app). Las filas viejas pasan con app '' = «sin decir cuál», que timbra todo.
+    const subCols = db.prepare('PRAGMA table_info(push_subscriptions)').all().map((c) => c.name);
+    if (subCols.length && !subCols.includes('app')) {
+        db.exec(`
+            CREATE TABLE push_subscriptions_v2 (
+                pubkey       TEXT NOT NULL,
+                app          TEXT NOT NULL DEFAULT '',
+                subscription TEXT NOT NULL,
+                updated_at   INTEGER NOT NULL,
+                PRIMARY KEY (pubkey, app)
+            );
+            INSERT INTO push_subscriptions_v2 (pubkey, app, subscription, updated_at)
+                SELECT pubkey, '', subscription, updated_at FROM push_subscriptions;
+            DROP TABLE push_subscriptions;
+            ALTER TABLE push_subscriptions_v2 RENAME TO push_subscriptions;
+        `);
+    }
+    // Y la cola dice para qué app es cada mensaje: cada app baja lo suyo y no lo de las demás.
+    const queueCols = db.prepare('PRAGMA table_info(offline_queue)').all().map((c) => c.name);
+    if (!queueCols.includes('app')) db.exec('ALTER TABLE offline_queue ADD COLUMN app TEXT;');
+
     const peerCols = db.prepare('PRAGMA table_info(peer_nodes)').all().map((c) => c.name);
     if (peerCols.length && !peerCols.includes('node_id')) db.exec('DROP TABLE peer_nodes;');
     db.exec(`
@@ -160,25 +187,31 @@ function setMeta(key, value) {
 
 // ----- push subscriptions ------------------------------------------------
 
+// Map<pubkey, Map<app, subscription>>; app '' = una suscripción que no dijo de qué app es.
 function loadPushSubscriptions() {
-    const rows = db.prepare('SELECT pubkey, subscription FROM push_subscriptions').all();
+    const rows = db.prepare('SELECT pubkey, app, subscription FROM push_subscriptions').all();
     const out = new Map();
     for (const r of rows) {
-        try { out.set(r.pubkey, JSON.parse(r.subscription)); } catch (_) {}
+        try {
+            if (!out.has(r.pubkey)) out.set(r.pubkey, new Map());
+            out.get(r.pubkey).set(r.app || '', JSON.parse(r.subscription));
+        } catch (_) {}
     }
     return out;
 }
 
-function upsertPushSubscription(pubkey, subscription) {
+function upsertPushSubscription(pubkey, app, subscription) {
     db.prepare(`
-        INSERT INTO push_subscriptions (pubkey, subscription, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(pubkey) DO UPDATE SET subscription = excluded.subscription, updated_at = excluded.updated_at
-    `).run(pubkey, JSON.stringify(subscription), Date.now());
+        INSERT INTO push_subscriptions (pubkey, app, subscription, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(pubkey, app) DO UPDATE SET subscription = excluded.subscription, updated_at = excluded.updated_at
+    `).run(pubkey, app || '', JSON.stringify(subscription), Date.now());
 }
 
-function deletePushSubscription(pubkey) {
-    db.prepare('DELETE FROM push_subscriptions WHERE pubkey = ?').run(pubkey);
+// Sin `app` (undefined) borra todas las de esa llave; con app, solo esa.
+function deletePushSubscription(pubkey, app) {
+    if (app === undefined) db.prepare('DELETE FROM push_subscriptions WHERE pubkey = ?').run(pubkey);
+    else db.prepare('DELETE FROM push_subscriptions WHERE pubkey = ? AND app = ?').run(pubkey, app || '');
 }
 
 // ----- offline queue -----------------------------------------------------
@@ -187,7 +220,7 @@ function deletePushSubscription(pubkey) {
 function loadOfflineQueue(now) {
     db.prepare('DELETE FROM offline_queue WHERE expires_at < ?').run(now);
     const rows = db.prepare(`
-        SELECT id, pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes
+        SELECT id, pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app
         FROM offline_queue ORDER BY id ASC
     `).all();
     const out = new Map();
@@ -202,7 +235,8 @@ function loadOfflineQueue(now) {
             message,
             queuedAt: r.queued_at,
             expiresAt: r.expires_at,
-            bytes: r.bytes
+            bytes: r.bytes,
+            app: r.app || null
         });
     }
     return out;
@@ -214,9 +248,9 @@ function insertQueued(pubkey, item) {
     // siempre a JSON (y se parsea al rehidratar). Round-trip estable.
     const msgText = JSON.stringify(item.message);
     const info = db.prepare(`
-        INSERT INTO offline_queue (pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(pubkey, item.from || null, item.fromPubkey || null, msgText, item.queuedAt, item.expiresAt, item.bytes || 0);
+        INSERT INTO offline_queue (pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(pubkey, item.from || null, item.fromPubkey || null, msgText, item.queuedAt, item.expiresAt, item.bytes || 0, item.app || null);
     return Number(info.lastInsertRowid);
 }
 

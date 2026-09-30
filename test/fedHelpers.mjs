@@ -194,10 +194,10 @@ export function makeUser() {
 }
 
 /** Conecta e identifica a un usuario contra un nodo. */
-export async function connectIdentified(url, user) {
+export async function connectIdentified(url, user, { app } = {}) {
     const c = await connectTo(url);
     const data = { op: 'identify', publickey: user.publickey, token: c.token, ts: Date.now() };
-    c.send({ type: 'identify', data, signature: user.sign(data) });
+    c.send({ type: 'identify', data, signature: user.sign(data), ...(app ? { app } : {}) });
     const res = await c.waitFor((m) => m.type === 'identified' || m.type === 'error');
     if (res.type === 'error') throw new Error('identify falló: ' + res.error);
     return c;
