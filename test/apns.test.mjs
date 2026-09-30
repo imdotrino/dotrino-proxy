@@ -24,8 +24,8 @@ describe('apns', () => {
         expect(b.aps.alert).toEqual({ 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' });
         expect(b.type).toBe('ring');
         expect(b.aps['content-available']).toBeUndefined();
-        // Un trino al azar, de los siete que instala DotrinoPush.
-        expect(b.aps.sound).toMatch(/^dotrino-ring-[1-7]\.caf$/);
+        // El trino, uno solo para todos los avisos (el que instala DotrinoPush).
+        expect(b.aps.sound).toBe('dotrino-ring.caf');
         // La extensión de la app puede reescribir el texto con el porqué, buscado en el teléfono.
         expect(b.aps['mutable-content']).toBe(1);
     });

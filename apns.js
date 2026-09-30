@@ -74,7 +74,7 @@ const RING = 'dotrino-ring.caf';
  */
 function apnsBody(payload) {
     return JSON.stringify({
-        aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: ringName(), 'mutable-content': 1 },
+        aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: RING, 'mutable-content': 1 },
         ...(payload || {}),
     });
 }
