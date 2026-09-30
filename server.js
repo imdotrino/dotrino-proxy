@@ -1008,9 +1008,23 @@ if (pushSubscriptions.size) {
     console.log(`[push] rehydrated ${[...pushSubscriptions.values()].reduce((n, m) => n + m.size, 0)} subscription(s) from SQLite`);
 }
 
+/** Lo que identifica al receptor de un timbre: el token nativo o el endpoint del navegador. */
+const subTarget = (sub) => (sub && (sub.token || sub.endpoint)) || null;
+
 function setPushSubscription(pubkey, app, subscription) {
     if (!pushSubscriptions.has(pubkey)) pushSubscriptions.set(pubkey, new Map());
-    pushSubscriptions.get(pubkey).set(app || '', subscription);
+    const subs = pushSubscriptions.get(pubkey);
+    // UN RECEPTOR, UNA SUSCRIPCIÓN. Si esta app se registró antes sin decir cuál era, esa fila
+    // vieja («a todas») sigue con el mismo token y timbraría con lo de las demás apps: es
+    // exactamente lo que se viene a quitar. La que dice su app la reemplaza.
+    const target = subTarget(subscription);
+    for (const [otherApp, other] of [...subs]) {
+        if (otherApp !== (app || '') && target && subTarget(other) === target) {
+            subs.delete(otherApp);
+            persist.deletePushSubscription(pubkey, otherApp);
+        }
+    }
+    subs.set(app || '', subscription);
     persist.upsertPushSubscription(pubkey, app || '', subscription);
 }
 

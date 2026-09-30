@@ -113,6 +113,27 @@ describe('timbre y cola por app', () => {
         await emisor.close();
     }, 30000);
 
+    it('una app que antes no decía cuál era y ahora sí: su fila vieja se va (si no, seguiría sonando con todo)', async () => {
+        const tel = makeUser();
+        const c = await connectIdentified(node.url, tel);
+        const sub = webSub('msgr-token');
+        const reg = async (app) => {
+            const data = { op: 'push-subscribe', publickey: tel.publickey, ts: Date.now(), subscription: JSON.stringify(sub), ...(app ? { app } : {}) };
+            c.send({ type: 'push-subscribe', data, signature: tel.sign(data) });
+            await c.waitFor((m) => m.type === 'push-subscribed' && (m.app || null) === (app || null));
+        };
+        await reg(null);          // messenger viejo: sin app
+        await reg('messenger');   // messenger nuevo: el MISMO token, ahora con app
+        await subscribe(c, tel, 'vault');
+        await c.close();
+        const emisor = await connectTo(node.url);
+        const i = hits.length;
+        emisor.send({ to_publickey: tel.publickey, message: 'pedido', app: 'vault', id: 'r1' });
+        await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'r1');
+        expect(await rungSince(i)).toEqual(['vault']);
+        await emisor.close();
+    }, 30000);
+
     it('una base con el esquema VIEJO se migra: la suscripción sigue y la cola también', async () => {
         // Es lo que pasa en proxy1/proxy2 al desplegar: la base existe, sin columna `app`.
         const tel = makeUser();
