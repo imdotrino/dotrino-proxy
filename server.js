@@ -667,7 +667,7 @@ function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ep
             queuedAt: queuedAt || Date.now(),
             expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes, app
         });
-        if (!quiet) ringPush(toPubkey, app, approvalHint(msgBody));
+        if (!quiet) ringPush(toPubkey, app, ringHint(msgBody));
         return { queued: true };
     }
     return { dropped: true };
@@ -1038,24 +1038,34 @@ function removePushSubscription(pubkey, app) {
 }
 
 /**
- * EL PORQUÉ DE UN PEDIDO DE APROBACIÓN, para el timbre del NAVEGADOR (dueño, 2026-09-30: «es
- * importante que se sepa el porqué de la notificación»; «la aprobación no debe ser exclusiva
- * del teléfono»). Si lo que se encola es el aviso de la bóveda de que hay un pedido
- * (`vault.admin.event` con `ev: 'approval'`), se saca de su cuerpo QUÉ se pide y QUIÉN: tipo,
- * cajón, nombre y id del aparato. Es lo que este proxio ya ve —ese cuerpo va firmado, no
- * sellado— y el Web Push viaja cifrado hasta el navegador (RFC 8291): el servicio de push no lo
- * lee. A FCM y APNs NO se manda: esos sí los leen Google y Apple (ver `ringPush`).
+ * EL PORQUÉ DEL TIMBRE, para el aviso del NAVEGADOR (dueño, 2026-09-30: «es importante que se
+ * sepa el porqué de la notificación»; «la aprobación no debe ser exclusiva del teléfono»). Si
+ * lo que se encola es un aviso de la bóveda (`vault.admin.event`), se saca de su cuerpo lo
+ * justo para decirlo:
+ *
+ *   · `ev: 'approval'` — hay un pedido: QUÉ se pide y QUIÉN (tipo, cajón, nombre e id).
+ *   · `ev: 'updated'`  — la bóveda SE ACTUALIZÓ (dueño, 2026-10-08): a qué versión y desde cuál.
+ *
+ * Es lo que este proxio ya ve —ese cuerpo va firmado, no sellado— y el Web Push viaja cifrado
+ * hasta el navegador (RFC 8291): el servicio de push no lo lee. A FCM y APNs NO se manda: esos
+ * sí los leen Google y Apple (ver `ringOne`).
  *
  * Es una pista para el aviso, no una decisión: quien aprueba lo hace en la consola, con el
- * pedido verificado contra la bóveda.
+ * pedido verificado contra la bóveda. Cualquier otro `ev` no da pista: timbre sin porqué.
  */
-function approvalHint(msgBody) {
+function ringHint(msgBody) {
     let m = msgBody;
     if (typeof m === 'string') { try { m = JSON.parse(m); } catch (_) { return null; } }
     const b = m && m.type === 'vault.admin.event' ? m.body : null;
-    if (!b || b.ev !== 'approval') return null;
+    if (!b) return null;
     const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
-    return { why: { ev: 'approval', kind: str(b.kind, 20) || 'read', ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
+    if (b.ev === 'approval') {
+        return { why: { ev: 'approval', kind: str(b.kind, 20) || 'read', ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
+    }
+    if (b.ev === 'updated') {
+        return { why: { ev: 'updated', version: str(b.version, 20), from: str(b.from, 20) } };
+    }
+    return null;
 }
 
 // Dispara el "timbre". Best-effort: si la subscription está muerta (404/410) la
@@ -3160,7 +3170,7 @@ wss.on('connection', (ws, req) => {
                 } else {
                     const bytes = bytesOfMessage(message.message);
                     enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes, app });
-                    if (!quiet) ringPush(pk, app, approvalHint(message.message));
+                    if (!quiet) ringPush(pk, app, ringHint(message.message));
                     queued.push(pk);
                 }
             } else if (ephemeral) {
@@ -3181,7 +3191,7 @@ wss.on('connection', (ws, req) => {
                 queued.push(pk);
                 // Timbre push (sin contenido): despierta a la app destinataria
                 // para que reconecte y baje su cola. Best-effort.
-                if (!quiet) ringPush(pk, app, approvalHint(message.message));
+                if (!quiet) ringPush(pk, app, ringHint(message.message));
             }
         }
         if (queued.length || failed.length || dropped.length) {
@@ -3435,7 +3445,7 @@ function setTurnIssuer(newIssuer) {
 // `applyFederationConfig` sale aquí por lo mismo que `setTurnIssuer`: es la costura
 // por donde entra la configuración de la bóveda, y probarla de verdad exige poder
 // llamarla con el servidor ya escuchando (que es justo cuando llega el bundle).
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, puedeSellar, _approvalHint: approvalHint };
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, puedeSellar, _ringHint: ringHint };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el
