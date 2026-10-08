@@ -1044,7 +1044,8 @@ function removePushSubscription(pubkey, app) {
  * justo para decirlo:
  *
  *   · `ev: 'approval'` — hay un pedido: QUÉ se pide y QUIÉN (tipo, cajón, nombre e id).
- *   · `ev: 'updated'`  — la bóveda SE ACTUALIZÓ (dueño, 2026-10-08): a qué versión y desde cuál.
+ *   · `ev: 'updated'`  — algo SE ACTUALIZÓ (dueño, 2026-10-08): a qué versión y desde cuál, y
+ *     QUÉ fue (`product`) y en qué aparato (nombre e id) — la bóveda, o un aparato de npm.
  *
  * Es lo que este proxio ya ve —ese cuerpo va firmado, no sellado— y el Web Push viaja cifrado
  * hasta el navegador (RFC 8291): el servicio de push no lo lee. A FCM y APNs NO se manda: esos
@@ -1063,7 +1064,7 @@ function ringHint(msgBody) {
         return { why: { ev: 'approval', kind: str(b.kind, 20) || 'read', ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
     }
     if (b.ev === 'updated') {
-        return { why: { ev: 'updated', version: str(b.version, 20), from: str(b.from, 20) } };
+        return { why: { ev: 'updated', version: str(b.version, 20), from: str(b.from, 20), product: str(b.product, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
     }
     return null;
 }

@@ -16,12 +16,15 @@ describe('ringHint', () => {
     const msg = JSON.stringify({ type: 'vault.admin.event', body: { ev: 'approval', id: 'x', ns: 'proxy', kind: 'read', deviceId: '904C-1002', label: 'proxy1', exp: 1 }, seal: {} })
     expect(_ringHint(msg)).toEqual({ why: { ev: 'approval', kind: 'read', ns: 'proxy', label: 'proxy1', deviceId: '904C-1002' } })
   })
-  it('saca a qué versión se actualizó la bóveda, y desde cuál', () => {
-    const msg = JSON.stringify({ type: 'vault.admin.event', body: { ev: 'updated', version: '0.147.0', from: '0.146.0', ts: 1 } })
-    expect(_ringHint(msg)).toEqual({ why: { ev: 'updated', version: '0.147.0', from: '0.146.0' } })
+  it('saca qué se actualizó, en qué aparato, a qué versión y desde cuál', () => {
+    const msg = JSON.stringify({ type: 'vault.admin.event', body: { ev: 'updated', version: '0.30.0', from: '0.29.0', product: '@dotrino/terminal-agent', deviceId: '904C-1002', label: 'pc', ts: 1 } })
+    expect(_ringHint(msg)).toEqual({ why: { ev: 'updated', version: '0.30.0', from: '0.29.0', product: '@dotrino/terminal-agent', label: 'pc', deviceId: '904C-1002' } })
+    // La bóveda puede no decir aparato: lo que falta es null, no se inventa.
+    expect(_ringHint({ type: 'vault.admin.event', body: { ev: 'updated', version: '0.147.0', from: '0.146.0' } }))
+      .toEqual({ why: { ev: 'updated', version: '0.147.0', from: '0.146.0', product: null, label: null, deviceId: null } })
     // Recortado y sin nada más del cuerpo: es un aviso, no un canal.
-    const r = _ringHint({ type: 'vault.admin.event', body: { ev: 'updated', version: 'v'.repeat(99), from: 7, extra: 'no' } })
-    expect(r).toEqual({ why: { ev: 'updated', version: 'v'.repeat(20), from: null } })
+    const r = _ringHint({ type: 'vault.admin.event', body: { ev: 'updated', version: 'v'.repeat(99), from: 7, product: 'p'.repeat(99), label: 'l'.repeat(99), deviceId: 'd'.repeat(99), extra: 'no' } })
+    expect(r).toEqual({ why: { ev: 'updated', version: 'v'.repeat(20), from: null, product: 'p'.repeat(64), label: 'l'.repeat(64), deviceId: 'd'.repeat(16) } })
   })
   it('no inventa nada para cualquier otro mensaje', () => {
     expect(_ringHint(JSON.stringify({ type: 'vault.admin.event', body: { ev: 'vars' } }))).toBe(null)
