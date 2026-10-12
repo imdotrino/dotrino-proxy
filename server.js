@@ -1037,6 +1037,26 @@ function removePushSubscription(pubkey, app) {
     persist.deletePushSubscription(pubkey, app);
 }
 
+// Las suscripciones de UN receptor (`target`) que cuelgan de una llave que ya no tiene.
+// Con `app`, solo las de esa app: un mismo token puede estar suscrito por dos partes de la
+// misma app con nombres distintos, y cada una dice lo suyo.
+// @returns {number} cuántas se quitaron
+function prunePushSubscriptions(target, app, keep) {
+    let removed = 0;
+    for (const [pubkey, subs] of [...pushSubscriptions]) {
+        if (keep.has(pubkey)) continue;
+        for (const [rowApp, sub] of [...subs]) {
+            if (app !== undefined && rowApp !== (app || '')) continue;
+            if (subTarget(sub) !== target) continue;
+            subs.delete(rowApp);
+            persist.deletePushSubscription(pubkey, rowApp);
+            removed++;
+        }
+        if (!subs.size) pushSubscriptions.delete(pubkey);
+    }
+    return removed;
+}
+
 /**
  * EL PORQUÉ DEL TIMBRE, para el aviso del NAVEGADOR (dueño, 2026-09-30: «es importante que se
  * sepa el porqué de la notificación»; «la aprobación no debe ser exclusiva del teléfono»). Si
@@ -1908,7 +1928,7 @@ wss.on('connection', (ws, req) => {
         // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
         protocol: 2,
         speaks: [1, 2],
-        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'turn', 'encpub'],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub'],
         timestamp: new Date().toISOString()
     }));
     
@@ -2002,6 +2022,9 @@ wss.on('connection', (ws, req) => {
                 return;
             } else if (message.type === 'push-unsubscribe') {
                 handlePushUnsubscribeMessage(ws, message);
+                return;
+            } else if (message.type === 'push-prune') {
+                handlePushPruneMessage(ws, message);
                 return;
             } else if (message.type === 'turn-credentials') {
                 handleTurnCredentialsMessage(ws, message);
@@ -2800,6 +2823,35 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify(response));
         } catch (e) {
             console.error('handlePushSubscribeMessage error:', e);
+        }
+    }
+
+    // UN RECEPTOR DICE QUÉ LLAVES LE QUEDAN, y se quitan sus demás suscripciones.
+    //   { type:'push-prune', target, app?, keep:[publickey…] }
+    //
+    // Es la baja de una cuenta que el aparato YA NO TIENE: la quitó, y con ella la llave con
+    // la que firmaría un `push-unsubscribe`. Sin esto el teléfono seguía sonando con los
+    // pedidos de una cuenta borrada (dueño, 2026-10-12).
+    //
+    // No va firmado, y no puede: no queda llave. Lo que autoriza es conocer el `target` (el
+    // token de APNs/FCM o el endpoint de Web Push), que solo tienen ese aparato y este proxio.
+    // Y lo único que se consigue con él es dejar de timbrar a ESE receptor.
+    function handlePushPruneMessage(ws, message) {
+        try {
+            const { target, keep } = message;
+            if (typeof target !== 'string' || !target || !Array.isArray(keep) || keep.some((k) => typeof k !== 'string')) {
+                const e = { type: 'error', code: 'bad-format', error: 'invalid push-prune format (expected target:string, keep:[publickey…], app?)' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            const removed = prunePushSubscriptions(target, message.app === undefined ? undefined : appOf(message.app), new Set(keep));
+            const response = { type: 'push-pruned', removed };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+        } catch (e) {
+            console.error('handlePushPruneMessage error:', e);
+            const err = { type: 'error', error: 'internal error in push-prune' };
+            applyMessageIds(err, message);
+            try { ws.send(JSON.stringify(err)); } catch (_) {}
         }
     }
 

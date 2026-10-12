@@ -134,6 +134,42 @@ describe('timbre y cola por app', () => {
         await emisor.close();
     }, 30000);
 
+    it('push-prune: el receptor dice qué llaves le quedan y deja de sonar con las demás', async () => {
+        // El teléfono quitó una cuenta: ya no tiene su llave, así que no puede firmar la baja.
+        const queda = makeUser(); const borrada = makeUser(); const ajena = makeUser(); const deOtraApp = makeUser();
+        const c = await connectTo(node.url);
+        const sub = webSub('telefono');
+        const reg = async (user, app, s = sub) => {
+            const data = { op: 'push-subscribe', publickey: user.publickey, ts: Date.now(), subscription: JSON.stringify(s), app };
+            c.send({ type: 'push-subscribe', data, signature: user.sign(data) });
+            expect((await c.waitFor((m) => (m.type === 'push-subscribed' && m.publickey === user.publickey && m.app === app) || m.type === 'error')).type).toBe('push-subscribed');
+        };
+        await reg(queda, 'vault'); await reg(borrada, 'vault'); await reg(deOtraApp, 'messenger');
+        await reg(ajena, 'vault', webSub('otro-telefono'));
+        const rings = async (user, app, id) => {
+            const i = hits.length;
+            c.send({ to_publickey: user.publickey, message: id, app, id });
+            await c.waitFor((m) => m.type === 'message_sent' && m.id === id);
+            return rungSince(i);
+        };
+        expect(await rings(borrada, 'vault', 'p0')).toEqual(['telefono']);
+
+        c.send({ type: 'push-prune', target: sub.endpoint, app: 'vault', keep: [queda.publickey], id: 'pr' });
+        const r = await c.waitFor((m) => m.id === 'pr');
+        expect(r.type).toBe('push-pruned');
+        expect(r.removed).toBe(1);
+
+        expect(await rings(borrada, 'vault', 'p1')).toEqual([]);                 // la borrada ya no suena
+        expect(await rings(queda, 'vault', 'p2')).toEqual(['telefono']);         // la que queda, sí
+        expect(await rings(deOtraApp, 'messenger', 'p3')).toEqual(['telefono']); // otra app: no se toca
+        expect(await rings(ajena, 'vault', 'p4')).toEqual(['otro-telefono']);    // otro receptor: tampoco
+
+        // Mal formado: se dice, no se quita nada.
+        c.send({ type: 'push-prune', target: sub.endpoint, id: 'bad' });
+        expect((await c.waitFor((m) => m.id === 'bad')).code).toBe('bad-format');
+        await c.close();
+    }, 30000);
+
     it('una base con el esquema VIEJO se migra: la suscripción sigue y la cola también', async () => {
         // Es lo que pasa en proxy1/proxy2 al desplegar: la base existe, sin columna `app`.
         const tel = makeUser();
