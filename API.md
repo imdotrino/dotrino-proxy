@@ -481,8 +481,14 @@ conexión; la credencial expira sola (`TURN_TTL_SECONDS`, default 600 s).
 ```
 
 **Respuesta (proxy sin TURN):** `{ "type": "turn-credentials", "enabled": false }`.
-**Errores:** sin `identify` previo, firma inválida, o `retry_after_ms` si se
-alcanzó la cuota por hora.
+**Errores:** sin `identify` previo, firma inválida, o un rechazo con `code` y
+`retry_after_ms`:
+
+| `code` | Qué pasó |
+|---|---|
+| `turn-quota` | se alcanzó la cuota de emisiones por hora (de esa pubkey o global) |
+| `turn-daily-cap` | el TURN llegó a su tope diario de tráfico; vuelve al día siguiente (UTC) |
+| `turn-usage-unknown` | hay tope y el proxy no puede leer el consumo: no emite hasta la siguiente lectura buena |
 
 ### Directorio de llaves de cifrado (`encpub` / `enc-lookup`)
 

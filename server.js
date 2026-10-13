@@ -5,6 +5,7 @@ const tokenManager = require('./tokenManager');
 const { createRateLimiter } = require('./rateLimiter');
 const { createUsageStats } = require('./usageStats');
 const { createTurnIssuer } = require('./turnCredentials');
+const { sendAlert, turnAlertText } = require('./alerts');
 const usageStats = createUsageStats();
 const crypto = require('crypto');
 
@@ -1805,7 +1806,15 @@ let rateLimiter = createRateLimiter();
 // ecosistema si el proxy está enrolado (ver vaultSecrets.js); el .env directo
 // (TURN_KEY_ID/TURN_KEY_API_TOKEN) queda como fallback para self-hosters.
 // Sin llaves: enabled:false (los clientes quedan STUN-only).
-let turnIssuer = createTurnIssuer();
+// El tope diario del TURN avisa por correo: un tope que corta callado se descubre tarde.
+const onTurnAlert = (ev) => { sendAlert(turnAlertText(ev)).catch(() => {}); };
+function logTurnCap(issuer, log = console.log) {
+    if (!issuer.enabled) return;
+    if (issuer.usage.enabled) log(`[turn] daily traffic cap: ${(issuer.usage.capBytes / 1e9).toFixed(2)} GB`);
+    else log('[turn] daily traffic cap is OFF: TURN_ACCOUNT_ID and TURN_ANALYTICS_API_TOKEN are not both set');
+}
+let turnIssuer = createTurnIssuer({ onAlert: onTurnAlert });
+logTurnCap(turnIssuer);
 let vaultSecretsHandle = null;
 // Lo último que dijo la bóveda y que este proceso NO tiene aplicado. Se expone en
 // `GET /peers` para que se vea sin leer logs. Con `changed` dura lo que tarda el
@@ -1834,9 +1843,10 @@ function startVaultSecretsLoop(log = console.log) {
             // sino también los topes (TTL, cuotas, timeout). Pasarle {keyId,
             // apiToken} como antes dejaba los topes clavados en el `.env` viejo.
             if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
-            turnIssuer = createTurnIssuer();
+            turnIssuer = createTurnIssuer({ onAlert: onTurnAlert });
             if (turnIssuer.enabled) log('[turn] Cloudflare keys from the vault: TURN enabled');
             else log('[vault] config received without TURN_KEY_ID/TURN_KEY_API_TOKEN: TURN stays off');
+            logTurnCap(turnIssuer, log);
             // La federación también sale de la bóveda: si los peers vinieron ahí
             // (y no en el `.env`), esta llamada es la que la levanta.
             try { applyFederationConfig(log); } catch (e) { log('[fed] could not apply the vault config: ' + e.message); }
@@ -2940,9 +2950,15 @@ wss.on('connection', (ws, req) => {
             }
             const result = await turnIssuer.issue(data.publickey);
             if (result.limited) {
+                const why = {
+                    'turn-daily-cap': 'turn-credentials: daily traffic cap reached',
+                    'turn-usage-unknown': 'turn-credentials: usage cannot be read, not issuing',
+                    'turn-quota': 'turn-credentials: cuota por hora alcanzada'
+                };
                 const e = {
                     type: 'error',
-                    error: 'turn-credentials: cuota por hora alcanzada',
+                    code: result.reason,
+                    error: why[result.reason],
                     retry_after_ms: result.retry_after_ms
                 };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
@@ -3455,7 +3471,7 @@ function stop() {
 
     // Reset del emisor TURN (limpia cache/cuotas; releé el .env)
     if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
-    turnIssuer = createTurnIssuer();
+    turnIssuer = createTurnIssuer({ onAlert: onTurnAlert });
     if (vaultSecretsHandle && typeof vaultSecretsHandle.stop === 'function') vaultSecretsHandle.stop();
     vaultSecretsHandle = null;
 

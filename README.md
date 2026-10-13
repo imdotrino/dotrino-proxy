@@ -47,6 +47,10 @@ cp .env.example .env   # luego completá las claves VAPID
 | `TURN_GLOBAL_MAX_PER_HOUR` | Techo GLOBAL de emisiones reales a Cloudflare/hora sumando todas las pubkeys (default 2000). Protege la cuenta de Cloudflare aunque un atacante rote pubkeys autofirmadas. |
 | `TURN_MAX_TRACKED` | Tope de pubkeys distintas retenidas en memoria (default 50000); barrido periódico + evicción oldest-first. |
 | `TURN_FETCH_TIMEOUT_MS` | Timeout del fetch a Cloudflare (default 10000). |
+| `TURN_ACCOUNT_ID` / `TURN_ANALYTICS_API_TOKEN` | Id de la cuenta de Cloudflare y un token con permiso **Account Analytics** (solo lectura): con los dos, el proxy lee cuánto tráfico lleva el TURN hoy y aplica el **tope diario**. Sin ellos el tope queda apagado, y lo dice en el log al arrancar. Con el tope puesto y sin poder leer el consumo, **no se emiten credenciales**. |
+| `TURN_DAILY_EGRESS_GB` | Tope diario de tráfico del TURN, en GB salientes (default 20; el día es UTC). Al alcanzarlo se deja de emitir hasta el día siguiente y quien no puede ir directo sigue por el proxy. Acota el gasto; no decide quién usa el relevo. |
+| `TURN_USAGE_POLL_SECONDS` | Cada cuánto se le pregunta el consumo a Cloudflare (default 300, mínimo 60). |
+| `ALERT_RESEND_API_KEY` / `ALERT_EMAIL_TO` / `ALERT_EMAIL_FROM` | Aviso por correo (Resend) cuando el TURN llega al tope diario o cuando no se puede leer su consumo. El remitente tiene que ser de un dominio verificado en Resend. Sin las tres, el aviso sale solo por el log (`[alert]`), que también dice que no se pudo mandar. |
 | `VAULT_SERVICE_DIR` | Dónde vive la identidad de servicio del proxy para leer secretos del vault (default `./vault-service`). |
 
 > **Requiere Node ≥ 22.5** por el módulo nativo `node:sqlite`.

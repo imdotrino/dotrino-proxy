@@ -16,7 +16,12 @@
  *   TURN_TTL_SECONDS       vida de cada credencial (default 600, 60..86400)
  *   TURN_MAX_PER_HOUR      emisiones por pubkey/hora (default 12)
  *   TURN_API_BASE          override del endpoint (tests)
+ *
+ * Y por encima de las cuotas, el TOPE DIARIO DE TRÁFICO (`turnUsage.js`): las cuotas
+ * acotan cuántas credenciales salen, no cuánto pasa por ellas.
  */
+
+const { createTurnUsage } = require('./turnUsage');
 
 const DEFAULT_TTL_S = 600;
 const DEFAULT_MAX_PER_HOUR = 12;
@@ -48,6 +53,9 @@ function createTurnIssuer(opts = {}) {
     const fetchImpl = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
 
     const enabled = Boolean(keyId && apiToken && fetchImpl);
+    // El tope diario de tráfico. Se le puede pasar hecho (tests); si no, sale del entorno.
+    const usage = opts.usage || createTurnUsage({ keyId, onAlert: opts.onAlert });
+    if (enabled) usage.start();
 
     // pubkey -> { iceServers, expiresAt } (se reusa hasta ~75% del TTL)
     const cache = new Map();
@@ -136,9 +144,14 @@ function createTurnIssuer(opts = {}) {
     /**
      * Emite (o reusa de cache) credenciales para una pubkey identificada.
      * @returns {Promise<{iceServers:any[], expiresAt:number, ttl:number}
-     *                   |{limited:true, retry_after_ms:number}>}
+     *                   |{limited:true, reason:'turn-quota'|'turn-daily-cap'|'turn-usage-unknown', retry_after_ms:number}>}
      */
     async function issue(pubkey) {
+        // Antes que la caché: con el tope alcanzado tampoco se reparte una credencial ya emitida.
+        await usage.settle();
+        const cap = usage.allowed();
+        if (!cap.ok) return { limited: true, reason: cap.reason, retry_after_ms: cap.retry_after_ms };
+
         const now = Date.now();
 
         const cached = cache.get(pubkey);
@@ -154,7 +167,7 @@ function createTurnIssuer(opts = {}) {
         const recent = pruneIssued(pubkey, now);
         if (recent.length >= maxPerHour) {
             const retry_after_ms = Math.max(1000, recent[0] + HOUR_MS - now);
-            return { limited: true, retry_after_ms };
+            return { limited: true, reason: 'turn-quota', retry_after_ms };
         }
 
         // Techo GLOBAL: aunque el atacante rote pubkeys (cada una con cuota
@@ -163,10 +176,10 @@ function createTurnIssuer(opts = {}) {
         globalIssues = globalIssues.filter((t) => now - t < HOUR_MS);
         if (globalIssues.length >= globalMaxPerHour) {
             const retry_after_ms = Math.max(1000, globalIssues[0] + HOUR_MS - now);
-            return { limited: true, retry_after_ms };
+            return { limited: true, reason: 'turn-quota', retry_after_ms };
         }
         if (inFlight.size >= maxInFlight) {
-            return { limited: true, retry_after_ms: 1000 };
+            return { limited: true, reason: 'turn-quota', retry_after_ms: 1000 };
         }
         // Tope de cardinalidad: si el working set ya es enorme, barré antes de crecer.
         if (issued.size >= maxTracked || cache.size >= maxTracked) sweep(now);
@@ -193,13 +206,14 @@ function createTurnIssuer(opts = {}) {
 
     function destroy() {
         if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+        usage.destroy();
         cache.clear();
         issued.clear();
         inFlight.clear();
         globalIssues = [];
     }
 
-    return { enabled, ttlSeconds, maxPerHour, globalMaxPerHour, issue, destroy, _sweep: sweep };
+    return { enabled, ttlSeconds, maxPerHour, globalMaxPerHour, usage, issue, destroy, _sweep: sweep };
 }
 
 module.exports = { createTurnIssuer };
