@@ -2955,8 +2955,11 @@ wss.on('connection', (ws, req) => {
                     'turn-usage-unknown': 'turn-credentials: usage cannot be read, not issuing',
                     'turn-quota': 'turn-credentials: cuota por hora alcanzada'
                 };
+                // 429: «ahora no». El cliente sigue por el proxio y vuelve a pedir pasado
+                // `retry_after_ms` (proxy-client ≥ 0.32.0).
                 const e = {
                     type: 'error',
+                    status: 429,
                     code: result.reason,
                     error: why[result.reason],
                     retry_after_ms: result.retry_after_ms

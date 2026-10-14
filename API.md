@@ -482,7 +482,8 @@ conexión; la credencial expira sola (`TURN_TTL_SECONDS`, default 600 s).
 
 **Respuesta (proxy sin TURN):** `{ "type": "turn-credentials", "enabled": false }`.
 **Errores:** sin `identify` previo, firma inválida, o un rechazo con `code` y
-`retry_after_ms`:
+`retry_after_ms` y `status: 429`. No es un fallo: el cliente sigue por el proxy y vuelve a
+pedir pasado `retry_after_ms` (`@dotrino/proxy-client` ≥ 0.32.0).
 
 | `code` | Qué pasó |
 |---|---|

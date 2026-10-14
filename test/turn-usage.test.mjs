@@ -203,3 +203,36 @@ describe('sendAlert', () => {
         expect(t.text).toMatch(/TURN_ANALYTICS_API_TOKEN/);
     });
 });
+
+describe('turn-credentials over the socket when the cap is reached', () => {
+    it('answers 429 with its code and retry_after_ms', async () => {
+        const { startTestServer, stopTestServer, connectClient } = await import('./helpers.mjs');
+        const { setTurnIssuer } = require('../server');
+        const { url } = await startTestServer();
+        try {
+            const { usage } = make(() => usageReply(25 * GB));
+            await usage.refresh();
+            setTurnIssuer(createTurnIssuer({ keyId: 'key1', apiToken: 't', fetchImpl: async () => { throw new Error('must not be called'); }, usage }));
+            const { webcrypto, createPrivateKey, sign: nodeSign } = await import('crypto');
+            const kp = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+            const pub = await webcrypto.subtle.exportKey('jwk', kp.publicKey);
+            const key = createPrivateKey({ key: await webcrypto.subtle.exportKey('jwk', kp.privateKey), format: 'jwk' });
+            const publickey = JSON.stringify({ kty: 'EC', crv: 'P-256', x: pub.x, y: pub.y });
+            const canon = (o) => (typeof o !== 'object' || o === null) ? JSON.stringify(o) : '{' + Object.keys(o).sort().map((k) => JSON.stringify(k) + ':' + canon(o[k])).join(',') + '}';
+            const sig = (d) => nodeSign('sha256', Buffer.from(canon(d)), { key, dsaEncoding: 'ieee-p1363' }).toString('base64');
+            const client = await connectClient(url);
+            const idData = { op: 'identify', publickey, token: client.token, ts: Date.now() };
+            client.send({ type: 'identify', data: idData, signature: sig(idData), id: 'i1' });
+            await client.waitFor((m) => m.type === 'identified');
+            const data = { op: 'turn-credentials', publickey, ts: Date.now() };
+            client.send({ type: 'turn-credentials', data, signature: sig(data), id: 't1' });
+            const res = await client.waitFor((m) => m.id === 't1');
+            expect(res).toMatchObject({ type: 'error', status: 429, code: 'turn-daily-cap' });
+            expect(res.retry_after_ms).toBeGreaterThan(0);
+            await client.close();
+        } finally {
+            setTurnIssuer(createTurnIssuer({ keyId: '', apiToken: '' }));
+            await stopTestServer();
+        }
+    });
+});
