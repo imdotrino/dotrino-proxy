@@ -3,7 +3,8 @@
 // Persistencia durable del proxy usando el SQLite nativo de Node (node:sqlite,
 // Node >= 22.5). Solo persistimos lo que NO es efímero:
 //   - push_subscriptions: pubkey -> PushSubscription (perderlas = no timbrar)
-//   - offline_queue: mensajes encolados 24h para destinatarios offline
+//   - offline_queue: mensajes encolados 24h para destinatarios offline (con
+//     PROXY_CONTENT_URL, solo el índice: el cuerpo vive en el dotrino-content)
 //
 // Los mapas token<->pubkey y los canales públicos NO se persisten: son
 // efímeros por diseño (el token cambia en cada conexión, los canales expiran).
@@ -109,6 +110,9 @@ function init(dbFile) {
     // Y la cola dice para qué app es cada mensaje: cada app baja lo suyo y no lo de las demás.
     const queueCols = db.prepare('PRAGMA table_info(offline_queue)').all().map((c) => c.name);
     if (!queueCols.includes('app')) db.exec('ALTER TABLE offline_queue ADD COLUMN app TEXT;');
+    // Con el cuerpo en el dotrino-content de la cuenta (contentQueue.js), la fila solo
+    // guarda DÓNDE está: `cid`, y `message` queda en 'null'.
+    if (!queueCols.includes('cid')) db.exec('ALTER TABLE offline_queue ADD COLUMN cid TEXT;');
 
     const peerCols = db.prepare('PRAGMA table_info(peer_nodes)').all().map((c) => c.name);
     if (peerCols.length && !peerCols.includes('node_id')) db.exec('DROP TABLE peer_nodes;');
@@ -220,19 +224,20 @@ function deletePushSubscription(pubkey, app) {
 function loadOfflineQueue(now) {
     db.prepare('DELETE FROM offline_queue WHERE expires_at < ?').run(now);
     const rows = db.prepare(`
-        SELECT id, pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app
+        SELECT id, pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app, cid
         FROM offline_queue ORDER BY id ASC
     `).all();
     const out = new Map();
     for (const r of rows) {
         if (!out.has(r.pubkey)) out.set(r.pubkey, []);
         let message = r.message;
-        try { message = JSON.parse(r.message); } catch (_) { /* fila legacy en texto plano */ }
+        if (r.cid) message = undefined;
+        else { try { message = JSON.parse(r.message); } catch (_) { /* fila legacy en texto plano */ } }
         out.get(r.pubkey).push({
             id: r.id,
             from: r.from_token,
             fromPubkey: r.from_pubkey,
-            message,
+            ...(r.cid ? { cid: r.cid } : { message }),
             queuedAt: r.queued_at,
             expiresAt: r.expires_at,
             bytes: r.bytes,
@@ -246,11 +251,11 @@ function loadOfflineQueue(now) {
 function insertQueued(pubkey, item) {
     // `message` puede ser objeto; SQLite solo bindea texto/números → serializamos
     // siempre a JSON (y se parsea al rehidratar). Round-trip estable.
-    const msgText = JSON.stringify(item.message);
+    const msgText = item.cid ? 'null' : JSON.stringify(item.message);
     const info = db.prepare(`
-        INSERT INTO offline_queue (pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(pubkey, item.from || null, item.fromPubkey || null, msgText, item.queuedAt, item.expiresAt, item.bytes || 0, item.app || null);
+        INSERT INTO offline_queue (pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app, cid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(pubkey, item.from || null, item.fromPubkey || null, msgText, item.queuedAt, item.expiresAt, item.bytes || 0, item.app || null, item.cid || null);
     return Number(info.lastInsertRowid);
 }
 

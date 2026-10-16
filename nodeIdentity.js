@@ -132,7 +132,10 @@ function identityFromRecord(raw) {
         pubkey: device.publickey,             // JWK serializado (string), como en identify
         privateJwk: device.privateJwk,
         nodeId,
-        hint: hintOf(nodeId)
+        hint: hintOf(nodeId),
+        // La cuenta a la que se enroló (la llave que firmó su cert). De aquí sale el `owner`
+        // con el que se comprueba que un dotrino-content es de la misma cuenta.
+        iss: typeof raw.iss === 'string' ? raw.iss : null
     };
 }
 

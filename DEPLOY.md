@@ -28,6 +28,7 @@ cp .env.example .env   # opcional: editar si querés config explícita
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | *(autogenerado)* | Si las dejás vacías, el proxy genera un par la **primera vez** y lo persiste en SQLite (estable entre reinicios). Definilas solo para control explícito o para **compartir el par entre varias instancias**. |
 | `VAPID_SUBJECT` | `mailto:admin@dotrino.com` | Contacto del header VAPID. Poné un mailto real. |
 | `PROXY_DB_FILE` | `./proxy-data.db` | Ruta de la base SQLite. |
+| `PROXY_CONTENT_URL` | — | HTTP local del `dotrino-content` de la cuenta del proxio. Con ella, el cuerpo de los mensajes en tránsito va ahí. |
 
 > ⚠️ **No commitees `.env` ni `proxy-data.db`** (ya están en `.gitignore`). El
 > `.env` contiene la VAPID privada y la DB contiene VAPID + subscriptions.

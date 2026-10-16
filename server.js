@@ -129,7 +129,8 @@ const mesh = new Mesh({
         try {
             const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = payload || {};
             if (typeof toPubkey !== 'string' || message === undefined) return;
-            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
+            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app))
+                .catch((e) => console.warn('[mesh] federated delivery failed:', e.message));
         } catch (e) { console.warn('[mesh] federated delivery failed:', e.message); }
     },
     // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
@@ -645,7 +646,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
 
 // Aplica un mensaje federado recibido de un peer: entrega a instancias locales,
 // o encola SÓLO si este proxy es el home del destinatario. NO re-reenvía (sin loops).
-function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false, app = null) {
+async function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false, app = null) {
     const set = pubkeyToTokens.get(toPubkey);
     let delivered = 0;
     if (set) {
@@ -663,23 +664,54 @@ function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ep
     if (ephemeral) return { dropped: true };
     if (isHome(toPubkey)) {
         const bytes = bytesOfMessage(msgBody);
-        enqueueOffline(toPubkey, {
-            from: null, fromPubkey, message: msgBody,
-            queuedAt: queuedAt || Date.now(),
-            expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes, app
-        });
+        try {
+            await enqueueOffline(toPubkey, {
+                from: null, fromPubkey, message: msgBody,
+                queuedAt: queuedAt || Date.now(),
+                expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes, app
+            });
+        } catch (e) {
+            console.error(`[queue] federated message could not be queued (${e.code || 'error'}): ${e.message}`);
+            return { failed: true, code: e.code || 'queue-unavailable' };
+        }
         if (!quiet) ringPush(toPubkey, app, ringHint(msgBody));
         return { queued: true };
     }
     return { dropped: true };
 }
+
+// ----- Dónde viven los mensajes en tránsito ------------------------------
+//
+// Con `PROXY_CONTENT_URL`, el CUERPO de cada mensaje encolado va al dotrino-content de la
+// cuenta del proxio (contentQueue.js) y aquí solo queda el índice. Sin ella, como siempre:
+// el cuerpo en SQLite y en RAM. Es una elección del despliegue, no un repliegue: con la
+// variable puesta y el node caído o ajeno, la cola NO acepta mensajes y lo dice.
+const { createContentQueue } = require('./contentQueue');
+const PROXY_CONTENT_URL = (process.env.PROXY_CONTENT_URL || '').trim();
+const contentQueue = PROXY_CONTENT_URL
+    ? createContentQueue({
+        url: PROXY_CONTENT_URL,
+        // La cuenta del proxio es la `iss` con la que se enroló: la misma huella con la
+        // que el node de content estampa su `owner`.
+        owner: async () => {
+            if (!nodeIdentity || !nodeIdentity.iss) return null;
+            const { pubkeyId } = await import('@dotrino/identity/capabilities');
+            return pubkeyId(nodeIdentity.iss);
+        }
+    })
+    : null;
+
+// Los topes se miden sobre lo que ocupa la cola. En SQLite eso es disco y RAM de este
+// proceso, y 1 MB por destinatario alcanza para texto. En el content caben imágenes: el
+// node tiene su propia cuota (`--max-gb`) y aquí solo se acota que nadie la acapare.
 const MAX_QUEUE_PER_PUBKEY = 200;                     // mensajes
-const MAX_BYTES_PER_PUBKEY = 1 * 1024 * 1024;         // 1 MB por destinatario
-const MAX_TOTAL_QUEUE_BYTES = 64 * 1024 * 1024;       // 64 MB totales
+const MAX_BYTES_PER_PUBKEY = contentQueue ? 32 * 1024 * 1024 : 1 * 1024 * 1024;
+const MAX_TOTAL_QUEUE_BYTES = contentQueue ? 512 * 1024 * 1024 : 64 * 1024 * 1024;
 let totalQueueBytes = 0;
 
 // publickey -> array<QueuedMsg>. Cada QueuedMsg lleva su `id` de fila SQLite
-// para poder borrarlo del disco al entregar/evictar. Se rehidrata al arrancar.
+// para poder borrarlo del disco al entregar/evictar, y `cid` si su cuerpo está en el
+// content (entonces no lleva `message`). Se rehidrata al arrancar.
 const offlineQueues = persist.loadOfflineQueue(Date.now());
 for (const q of offlineQueues.values()) {
     for (const item of q) totalQueueBytes += item.bytes || 0;
@@ -693,23 +725,30 @@ function bytesOfMessage(m) {
     catch (_) { return 0; }
 }
 
+/** Saca de la cuenta, del disco y del content lo que ya se entregó o se descartó. */
+function forgetQueued(items) {
+    if (!items.length) return;
+    const ids = [];
+    for (const item of items) {
+        totalQueueBytes -= item.bytes || 0;
+        if (item.id != null) ids.push(item.id);
+        if (item.cid && contentQueue) contentQueue.remove(item.cid);
+    }
+    persist.deleteQueuedByIds(ids);
+}
+
 function trimQueueByCaps(pubkey) {
     const q = offlineQueues.get(pubkey);
     if (!q) return;
-    const droppedIds = [];
-    while (q.length > MAX_QUEUE_PER_PUBKEY) {
-        const dropped = q.shift();
-        totalQueueBytes -= dropped.bytes || 0;
-        if (dropped.id != null) droppedIds.push(dropped.id);
-    }
+    const dropped = [];
+    while (q.length > MAX_QUEUE_PER_PUBKEY) dropped.push(q.shift());
     let bytes = q.reduce((a, x) => a + (x.bytes || 0), 0);
     while (bytes > MAX_BYTES_PER_PUBKEY && q.length) {
-        const dropped = q.shift();
-        bytes -= dropped.bytes || 0;
-        totalQueueBytes -= dropped.bytes || 0;
-        if (dropped.id != null) droppedIds.push(dropped.id);
+        const d = q.shift();
+        bytes -= d.bytes || 0;
+        dropped.push(d);
     }
-    persist.deleteQueuedByIds(droppedIds);
+    forgetQueued(dropped);
     if (q.length === 0) offlineQueues.delete(pubkey);
 }
 
@@ -717,7 +756,6 @@ function evictGloballyIfOverCap() {
     if (totalQueueBytes <= MAX_TOTAL_QUEUE_BYTES) return;
     // Encuentra entradas más viejas a través de todas las colas y descarta
     // hasta volver bajo el límite.
-    const droppedIds = [];
     while (totalQueueBytes > MAX_TOTAL_QUEUE_BYTES) {
         let oldestPk = null;
         let oldestTs = Infinity;
@@ -728,20 +766,34 @@ function evictGloballyIfOverCap() {
             }
         }
         if (!oldestPk) break;
-        const dropped = offlineQueues.get(oldestPk).shift();
-        totalQueueBytes -= dropped.bytes || 0;
-        if (dropped.id != null) droppedIds.push(dropped.id);
+        forgetQueued([offlineQueues.get(oldestPk).shift()]);
         if (offlineQueues.get(oldestPk).length === 0) offlineQueues.delete(oldestPk);
     }
-    persist.deleteQueuedByIds(droppedIds);
 }
 
-function enqueueOffline(recipientPubkey, queued) {
+/** Mete `items` en la cola de `pubkey` respetando el orden de llegada. */
+function placeQueued(pubkey, items) {
+    if (!items.length) return;
+    const q = offlineQueues.get(pubkey) || [];
+    q.push(...items);
+    q.sort((a, b) => a.queuedAt - b.queuedAt);
+    offlineQueues.set(pubkey, q);
+}
+
+/**
+ * Encola un mensaje para un destinatario desconectado. Con content, primero sube el
+ * cuerpo y solo después lo anota: un mensaje anotado sin cuerpo no existe. Lanza con
+ * `code` si no se pudo guardar, y quien llama se lo dice a quien lo mandó.
+ */
+async function enqueueOffline(recipientPubkey, queued) {
+    if (contentQueue) {
+        queued.cid = await contentQueue.put(recipientPubkey, queued.message, queued.expiresAt);
+        delete queued.message;
+    }
     // Persistir primero para obtener el id de fila; así un evict/flush posterior
     // puede borrarlo del disco.
     queued.id = persist.insertQueued(recipientPubkey, queued);
-    if (!offlineQueues.has(recipientPubkey)) offlineQueues.set(recipientPubkey, []);
-    offlineQueues.get(recipientPubkey).push(queued);
+    placeQueued(recipientPubkey, [queued]);
     totalQueueBytes += queued.bytes || 0;
     trimQueueByCaps(recipientPubkey);
     evictGloballyIfOverCap();
@@ -750,38 +802,67 @@ function enqueueOffline(recipientPubkey, queued) {
 /**
  * Entrega la cola de `pubkey` a esta conexión. Con `app`, solo lo que es para esa app (o lo
  * que no dijo para cuál); lo de las otras apps de la misma llave se queda esperando a su dueña.
+ *
+ * Lo que toca se RECLAMA antes del primer `await` (se saca de la cola): con el cuerpo en el
+ * content, leerlo es asíncrono, y dos instancias de la misma app identificándose a la vez
+ * se lo habrían entregado las dos. Lo que no se pudo entregar vuelve a la cola, en su orden.
  */
-function flushOfflineFor(pubkey, ws, app = null) {
+async function flushOfflineFor(pubkey, ws, app = null) {
     const q = offlineQueues.get(pubkey);
     if (!q || q.length === 0) return 0;
     const now = Date.now();
-    let delivered = 0;
+    const mine = [];
     const keep = [];
-    const doneIds = [];
+    const expired = [];
     for (const item of q) {
-        if (item.expiresAt < now) { totalQueueBytes -= item.bytes || 0; if (item.id != null) doneIds.push(item.id); continue; }
-        if (!appMatches(app, item.app)) { keep.push(item); continue; }
+        if (item.expiresAt < now) expired.push(item);
+        else if (!appMatches(app, item.app)) keep.push(item);
+        else mine.push(item);
+    }
+    if (keep.length) offlineQueues.set(pubkey, keep); else offlineQueues.delete(pubkey);
+    forgetQueued(expired);
+
+    let delivered = 0;
+    const done = [];
+    let back = [];
+    for (let i = 0; i < mine.length; i++) {
+        const item = mine[i];
+        let message = item.message;
+        if (item.cid) {
+            if (!contentQueue) {
+                console.error(`[queue] ${mine.length - i} queued message(s) live in a content node, but PROXY_CONTENT_URL is not set`);
+                back = mine.slice(i);
+                break;
+            }
+            try { message = await contentQueue.get(item.cid, pubkey); }
+            catch (e) {
+                if (e.code === 'queue-gone' || e.code === 'queue-corrupt') {
+                    // No hay nada que entregar: se dice, y la fila se quita.
+                    console.error(`[queue] a queued message was lost: ${e.message}`);
+                    done.push(item);
+                    continue;
+                }
+                console.error(`[queue] cannot read queued messages now, they stay queued: ${e.message}`);
+                back = mine.slice(i);
+                break;
+            }
+        }
+        if (ws.readyState !== 1) { back = mine.slice(i); break; }
         try {
             ws.send(JSON.stringify({
                 type: 'message',
                 from: item.from,
                 from_publickey: item.fromPubkey || null,
-                message: item.message,
+                message,
                 queued: true,
                 queued_at: new Date(item.queuedAt).toISOString()
             }));
-            delivered++;
-        } catch (_) { /* ws not writable, give up — keep the rest for next time */
-            persist.deleteQueuedByIds(doneIds);
-            const rest = q.filter((x) => !doneIds.includes(x.id));
-            if (rest.length) offlineQueues.set(pubkey, rest); else offlineQueues.delete(pubkey);
-            return delivered;
-        }
-        totalQueueBytes -= item.bytes || 0;
-        if (item.id != null) doneIds.push(item.id);
+        } catch (_) { back = mine.slice(i); break; }
+        delivered++;
+        done.push(item);
     }
-    persist.deleteQueuedByIds(doneIds);
-    if (keep.length) offlineQueues.set(pubkey, keep); else offlineQueues.delete(pubkey);
+    forgetQueued(done);
+    placeQueued(pubkey, back);
     return delivered;
 }
 
@@ -789,14 +870,8 @@ function cleanupOfflineQueues() {
     const now = Date.now();
     for (const [pk, q] of Array.from(offlineQueues.entries())) {
         let i = 0;
-        const expiredIds = [];
-        while (i < q.length && q[i].expiresAt < now) {
-            totalQueueBytes -= q[i].bytes || 0;
-            if (q[i].id != null) expiredIds.push(q[i].id);
-            i++;
-        }
-        if (i > 0) q.splice(0, i);
-        persist.deleteQueuedByIds(expiredIds);
+        while (i < q.length && q[i].expiresAt < now) i++;
+        if (i > 0) forgetQueued(q.splice(0, i));
         if (q.length === 0) offlineQueues.delete(pk);
     }
     persist.deleteExpired(now);
@@ -1709,7 +1784,10 @@ const server = http.createServer((req, res) => {
             'content-type': 'application/json',
             'access-control-allow-origin': '*'
         });
-        res.end(JSON.stringify({ ok: true }));
+        // `queue`: dónde guarda este nodo los mensajes en tránsito. `content-unavailable`
+        // quiere decir que está configurado para el content y ahora no puede encolar.
+        const queue = contentQueue ? (contentQueue.state.ready === true ? 'content' : 'content-unavailable') : 'local';
+        res.end(JSON.stringify({ ok: true, queue }));
         return;
     }
     /**
@@ -1762,7 +1840,7 @@ const server = http.createServer((req, res) => {
     if (req.url === '/federate' && req.method === 'POST') {
         let size = 0; const chunks = [];
         req.on('data', c => { size += c.length; if (size > 2 * 1024 * 1024) { req.destroy(); } else chunks.push(c); });
-        req.on('end', () => {
+        req.on('end', async () => {
             try {
                 const envelope = JSON.parse(Buffer.concat(chunks).toString('utf8'));
                 // Sin firma válida de un peer PINEADO no se entrega nada: si no,
@@ -1774,7 +1852,7 @@ const server = http.createServer((req, res) => {
                     res.end(JSON.stringify({ error: check.reason })); return; }
                 const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = check.body;
                 if (typeof toPubkey !== 'string' || message === undefined) { res.writeHead(400); res.end(); return; }
-                const r = deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
+                const r = await deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
                 res.writeHead(200, { 'content-type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, ...r }));
             } catch (_) { res.writeHead(400); res.end(); }
@@ -2106,7 +2184,8 @@ wss.on('connection', (ws, req) => {
                 const targetPubkeys = Array.isArray(message.to_publickey)
                     ? message.to_publickey
                     : [message.to_publickey];
-                handlePubkeyAddressedMessage(ws, message, targetPubkeys);
+                handlePubkeyAddressedMessage(ws, message, targetPubkeys)
+                    .catch((e) => console.error('handlePubkeyAddressedMessage error:', e));
                 if (!hasTokenTo) return; // si solo era pubkey-addressed, terminamos
             }
 
@@ -2646,7 +2725,7 @@ wss.on('connection', (ws, req) => {
         }
     }
 
-    function handleIdentifyMessage(ws, message) {
+    async function handleIdentifyMessage(ws, message) {
         try {
             const data = message.data;
             const sig  = message.signature;
@@ -2744,7 +2823,7 @@ wss.on('connection', (ws, req) => {
                 bindExtraPubkey(master, ws.token);
                 registerHome(master);
                 masterBound = master;
-                if (masterWasFirst || connApp) masterDelivered = flushOfflineFor(master, ws, connApp);
+                if (masterWasFirst || connApp) masterDelivered = await flushOfflineFor(master, ws, connApp);
             }
 
             // Acta de perfil: bindea también el `profileId` (la PERSONA), de modo que un
@@ -2757,12 +2836,12 @@ wss.on('connection', (ws, req) => {
                 bindExtraPubkey(profileId, ws.token);
                 registerHome(profileId);
                 profileBound = profileId;
-                if (profileWasFirst || connApp) profileDelivered = flushOfflineFor(profileId, ws, connApp);
+                if (profileWasFirst || connApp) profileDelivered = await flushOfflineFor(profileId, ws, connApp);
             } else if (profileId) {
                 profileBound = profileId;
             }
 
-            const delivered = (wasFirstInstance || connApp) ? flushOfflineFor(data.publickey, ws, connApp) : 0;
+            const delivered = (wasFirstInstance || connApp) ? await flushOfflineFor(data.publickey, ws, connApp) : 0;
             const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered + profileDelivered, master: masterBound, profile: profileBound };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
@@ -3171,7 +3250,7 @@ wss.on('connection', (ws, req) => {
         if (enviadas === 0) resolver();
     }
 
-    function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
+    async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
         const senderPubkey = tokenToPubkey.get(ws.token) || null;
         const now = Date.now();
         // Mensaje EFÍMERO: si el destinatario no está ahora, no vale la pena
@@ -3194,7 +3273,24 @@ wss.on('connection', (ws, req) => {
         const queued = [];
         const dropped = [];
         const failed = [];
+        // Por qué no se pudo encolar (p. ej. `queue-unavailable`): sin esto, «no está y no
+        // se pudo guardar» se veía igual que un destinatario inválido.
+        let queueError = null;
         let totalDeliveries = 0;
+        const queueFor = async (pk) => {
+            try {
+                await enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes: bytesOfMessage(message.message), app });
+            } catch (e) {
+                console.error(`[queue] message for an offline recipient could not be queued (${e.code || 'error'}): ${e.message}`);
+                queueError = e.code || 'queue-unavailable';
+                failed.push(pk);
+                return;
+            }
+            queued.push(pk);
+            // Timbre push (sin contenido): despierta a la app destinataria
+            // para que reconecte y baje su cola. Best-effort.
+            if (!quiet) ringPush(pk, app, ringHint(message.message));
+        };
         for (const pk of targetPubkeys) {
             if (!pk || typeof pk !== 'string') { failed.push(pk); continue; }
             // Self?
@@ -3242,30 +3338,14 @@ wss.on('connection', (ws, req) => {
                     // nada: si el destinatario no está, se perdió y punto.
                     dropped.push(pk);
                 } else {
-                    const bytes = bytesOfMessage(message.message);
-                    enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes, app });
-                    if (!quiet) ringPush(pk, app, ringHint(message.message));
-                    queued.push(pk);
+                    await queueFor(pk);
                 }
             } else if (ephemeral) {
                 // Sin federación y sin destinatario local: no hay a quién entregar.
                 dropped.push(pk);
             } else {
                 // Sin federación: comportamiento actual (cola offline 24h single-drain).
-                const bytes = bytesOfMessage(message.message);
-                enqueueOffline(pk, {
-                    from: ws.token,
-                    fromPubkey: senderPubkey,
-                    message: message.message,
-                    queuedAt: now,
-                    expiresAt,
-                    bytes,
-                    app
-                });
-                queued.push(pk);
-                // Timbre push (sin contenido): despierta a la app destinataria
-                // para que reconecte y baje su cola. Best-effort.
-                if (!quiet) ringPush(pk, app, ringHint(message.message));
+                await queueFor(pk);
             }
         }
         if (queued.length || failed.length || dropped.length) {
@@ -3279,6 +3359,7 @@ wss.on('connection', (ws, req) => {
             // `dropped` solo aparece con mensajes efímeros: dice "no se guardó",
             // que para la app NO es lo mismo que "falló" ni que "quedó encolado".
             if (dropped.length) response.dropped = dropped;
+            if (queueError) response.code = queueError;
             applyMessageIds(response, message);
             try { ws.send(JSON.stringify(response)); } catch (_) {}
         }
@@ -3361,6 +3442,11 @@ async function start(port = Number(PORT)) {
     // se emita, así que tiene que estar puesto ANTES de aceptar la primera
     // conexión. Leerla es lo único asíncrono del arranque.
     await initNodeIdentity();
+    // Dónde van los mensajes en tránsito: con PROXY_CONTENT_URL, al content de la cuenta de
+    // este nodo. Se comprueba de quién es el node antes de guardarle nada (y cada minuto
+    // mientras no cuadre: el node puede arrancar después que el proxio).
+    if (contentQueue) contentQueue.start();
+    else console.log('[queue] in-flight messages are stored locally (SQLite); set PROXY_CONTENT_URL to keep them in this account\'s content node');
     // Quién ya conozco, antes de aceptar nada: la federación puede tardar en
     // levantarse (la configura la bóveda), pero un peer ya pineado que llame
     // mientras tanto no tiene por qué rebotar.
@@ -3429,6 +3515,7 @@ async function start(port = Number(PORT)) {
  * @returns {Promise<void>}
  */
 function stop() {
+    if (contentQueue) contentQueue.stop();
     if (channelCleanupInterval) {
         clearInterval(channelCleanupInterval);
         channelCleanupInterval = null;
