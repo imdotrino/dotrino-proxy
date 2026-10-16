@@ -138,6 +138,25 @@ describe('cola offline en el content de la cuenta', () => {
         await Promise.all([a.close(), b.close()]);
     });
 
+    it('a binary body is stored raw in the content node (no base64) and comes back as bytes', async () => {
+        const alice = makeUser();
+        const bob = makeUser();
+        const a = await connectIdentified(node.url, alice);
+        const data = crypto.randomBytes(500 * 1024);
+        a.sendBinary({ to_publickey: [bob.publickey] }, data);
+        await a.waitFor((m) => m.type === 'message_sent' && m.queued?.length === 1);
+        expect(await waitUntil(() => content.blobs.size === 1)).toBe(true);
+        const [stored] = [...content.blobs.values()];
+        expect(stored.bytes[0]).toBe(0x01);
+        expect(stored.bytes.length).toBeLessThan(data.length + 1024);
+        const b = await connectIdentified(node.url, bob);
+        const got = await b.waitFor((m) => m.type === 'message' && m.queued);
+        expect(got.binary).toBe(true);
+        expect(Buffer.compare(got.message, data)).toBe(0);
+        expect(await waitUntil(() => content.blobs.size === 0)).toBe(true);
+        await Promise.all([a.close(), b.close()]);
+    });
+
     it('con un node de OTRA cuenta no encola, y se lo dice a quien manda', async () => {
         const alice = makeUser();
         const bob = makeUser();

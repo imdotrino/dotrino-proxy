@@ -21,6 +21,7 @@ import { fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const { encodeFrame, decodeFrame } = require('../body');
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'server.js');
@@ -142,8 +143,14 @@ export function connectTo(url) {
         const recv = [];
         const listeners = [];
         const t = setTimeout(() => reject(new Error(`timeout conectando a ${url}`)), 8000);
-        ws.on('message', (raw) => {
-            let m; try { m = JSON.parse(raw.toString()); } catch (_) { return; }
+        ws.on('message', (raw, isBinary) => {
+            let m;
+            if (isBinary) {
+                // Trama binaria (body.js): se deja como la de texto, con `message` en bytes.
+                try { const f = decodeFrame(raw); m = { ...f.header, message: Buffer.from(f.body), binary: true }; } catch (_) { return; }
+            } else {
+                try { m = JSON.parse(raw.toString()); } catch (_) { return; }
+            }
             recv.push(m);
             for (const l of listeners.slice()) if (l.pred(m)) { l.done(m); }
             if (m.type === 'connected') {
@@ -151,6 +158,7 @@ export function connectTo(url) {
                 resolve({
                     ws, recv, token: m.token,
                     send: (o) => ws.send(JSON.stringify(o)),
+                    sendBinary: (header, bytes) => ws.send(encodeFrame(header, bytes), { binary: true }),
                     waitFor: (pred, ms = 6000) => new Promise((res, rej) => {
                         const hit = recv.find(pred);
                         if (hit) return res(hit);
@@ -204,3 +212,15 @@ export async function connectIdentified(url, user, { app } = {}) {
 }
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Espera a que los nodos tengan su enlace de malla listo (el relay por instancia lo exige). */
+export async function waitForMesh(nodes, ms = 30000) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+        const states = await Promise.all(nodes.map((n) => fetch(`${n.http}/peers`).then((r) => r.json()).catch(() => ({ peers: [] }))));
+        const ready = (s) => s.peers?.length && Object.values(s.mesh || {}).some((m) => m.ready);
+        if (states.every(ready)) return;
+        if (Date.now() > deadline) throw new Error('the mesh was not ready in time');
+        await sleep(300);
+    }
+}

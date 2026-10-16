@@ -25,6 +25,7 @@
  */
 
 const crypto = require('crypto');
+const { encodeFrame, decodeFrame, FRAME_VERSION } = require('./body');
 
 const TIMEOUT_MS = 10000;
 const RECHECK_MS = 60 * 1000;
@@ -90,7 +91,10 @@ function createContentQueue({ url, owner, log = console.log }) {
     /** Guarda el cuerpo y devuelve su `cid`. Lanza con `code` si no se pudo. */
     async function put(recipient, message, expiresAt) {
         if (!(await ensure())) throw err(`offline queue unavailable: ${state.reason}`, 'queue-unavailable');
-        const body = JSON.stringify({ to: recipient, n: crypto.randomBytes(12).toString('base64url'), message });
+        // Un cuerpo en bytes (body.js) se guarda en crudo detrás de la envoltura, sin base64:
+        // [0x01][u32 largo][JSON { to, n }][bytes]. El texto, como siempre, en un JSON.
+        const wrap = { to: recipient, n: crypto.randomBytes(12).toString('base64url') };
+        const body = Buffer.isBuffer(message) ? encodeFrame(wrap, message) : JSON.stringify({ ...wrap, message });
         const ttl = Math.max(60 * 1000, expiresAt - Date.now());
         const r = await request(`${base}/c?enc=1&ttl=${ttl}`, {
             method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body
@@ -114,7 +118,13 @@ function createContentQueue({ url, owner, log = console.log }) {
         // El cid ES el hash: lo que no cuadre no se entrega, venga de donde venga.
         const hash = 'sha256-' + crypto.createHash('sha256').update(bytes).digest('hex');
         if (hash !== cid) throw err(`queued message ${cid} does not match its hash`, 'queue-corrupt');
-        const body = JSON.parse(bytes.toString('utf8'));
+        let body;
+        if (bytes[0] === FRAME_VERSION) {
+            const f = decodeFrame(bytes);
+            body = { to: f.header.to, message: Buffer.from(f.body) };
+        } else {
+            body = JSON.parse(bytes.toString('utf8'));
+        }
         if (body.to !== recipient) throw err(`queued message ${cid} is for someone else`, 'queue-corrupt');
         return body.message;
     }

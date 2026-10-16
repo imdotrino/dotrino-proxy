@@ -129,7 +129,7 @@ const mesh = new Mesh({
         try {
             const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = payload || {};
             if (typeof toPubkey !== 'string' || message === undefined) return;
-            deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app))
+            deliverFederated(toPubkey, wireBody.fromJson(message), fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app))
                 .catch((e) => console.warn('[mesh] federated delivery failed:', e.message));
         } catch (e) { console.warn('[mesh] federated delivery failed:', e.message); }
     },
@@ -337,6 +337,7 @@ const pairingCodes = new PairingCodes();
 
 // Mensajes relayados a una instancia de otro nodo, esperando por si el dueño dice que ya
 // no existe: rid -> { ws, message, toInstance, timer }. Si en 15 s no dice nada, llegó.
+const wireBody = require('./body');
 const pendingRelays = new Map();
 let relaySeq = 0;
 
@@ -360,12 +361,7 @@ function deliverRelayed(payload, link) {
     const conn = activeConnections.get(toInstance);
     if (!conn) return { failed: true };
     try {
-        conn.ws.send(JSON.stringify({
-            type: 'message',
-            from: fromInstance || null,
-            from_publickey: fromPubkey || null,
-            message
-        }));
+        wireBody.sendMessage(conn.ws, { type: 'message', from: fromInstance || null, from_publickey: fromPubkey || null }, wireBody.fromJson(message));
     } catch (_) { return { failed: true }; }
     if (fromInstance) {
         connectionPairs.add(createPairKey(toInstance, fromInstance));
@@ -645,7 +641,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
     if (mesh.hasLinks()) {
         // Un efímero NO se guarda para reenviar: si el enlace está caído, para
         // cuando vuelva ya no sirve. Se intenta ahora o no se intenta.
-        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet, app }, { retain: !ephemeral });
+        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: wireBody.toJson(msgBody), queuedAt, expiresAt, ephemeral, quiet, app }, { retain: !ephemeral });
         return;
     }
 
@@ -655,7 +651,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
         from: nodeIdentity.pubkey,
         ts: Date.now(),
         nonce: nodeIdentityLib.newNonce(),
-        toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet, app
+        toPubkey, fromPubkey, message: wireBody.toJson(msgBody), queuedAt, expiresAt, ephemeral, quiet, app
     };
     const payload = JSON.stringify({ body, signature: nodeIdentityLib.signBody(nodeIdentity, body) });
     for (const peer of PROXY_PEERS) {
@@ -679,7 +675,7 @@ async function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expires
             const conn = activeConnections.get(tk);
             if (!conn || !appMatches(conn.app, app)) continue;
             try {
-                conn.ws.send(JSON.stringify({ type: 'message', from: null, from_publickey: fromPubkey, message: msgBody }));
+                wireBody.sendMessage(conn.ws, { type: 'message', from: null, from_publickey: fromPubkey }, msgBody);
                 delivered++;
             } catch (_) {}
         }
@@ -748,8 +744,7 @@ if (offlineQueues.size) {
 }
 
 function bytesOfMessage(m) {
-    try { return Buffer.byteLength(typeof m === 'string' ? m : JSON.stringify(m), 'utf8'); }
-    catch (_) { return 0; }
+    return wireBody.bodyBytes(m);
 }
 
 /** Saca de la cuenta, del disco y del content lo que ya se entregó o se descartó. */
@@ -892,14 +887,13 @@ async function flushOfflineFor(pubkey, ws, app = null) {
         }
         if (ws.readyState !== 1) { back = mine.slice(i); break; }
         try {
-            ws.send(JSON.stringify({
+            wireBody.sendMessage(ws, {
                 type: 'message',
                 from: item.from,
                 from_publickey: item.fromPubkey || null,
-                message,
                 queued: true,
                 queued_at: new Date(item.queuedAt).toISOString()
-            }));
+            }, message);
         } catch (_) { back = mine.slice(i); break; }
         delivered++;
         done.push(item);
@@ -1895,7 +1889,7 @@ const server = http.createServer((req, res) => {
                     res.end(JSON.stringify({ error: check.reason })); return; }
                 const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = check.body;
                 if (typeof toPubkey !== 'string' || message === undefined) { res.writeHead(400); res.end(); return; }
-                const r = await deliverFederated(toPubkey, message, fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
+                const r = await deliverFederated(toPubkey, wireBody.fromJson(message), fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
                 res.writeHead(200, { 'content-type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, ...r }));
             } catch (_) { res.writeHead(400); res.end(); }
@@ -2059,7 +2053,7 @@ wss.on('connection', (ws, req) => {
         // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
         protocol: 2,
         speaks: [1, 2],
-        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub'],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary'],
         timestamp: new Date().toISOString()
     }));
     
@@ -2072,9 +2066,21 @@ wss.on('connection', (ws, req) => {
     if (process.env.NODE_ENV !== 'test') console.log(`[proxy] client connected · token ${token} · ${activeConnections.size} active`);
     
     // Manejar mensajes recibidos
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
         try {
-            const message = JSON.parse(data.toString());
+            let message;
+            if (isBinary) {
+                // Trama binaria (body.js): la cabecera de siempre y el `message` en bytes.
+                let frame;
+                try { frame = wireBody.decodeFrame(data); }
+                catch (e) {
+                    ws.send(JSON.stringify({ type: 'error', code: e.code || 'bad-frame', error: `could not process the message: ${e.message}` }));
+                    return;
+                }
+                message = { ...frame.header, message: Buffer.from(frame.body) };
+            } else {
+                message = JSON.parse(data.toString());
+            }
 
             // Actualizar actividad del token
             tokenManager.updateTokenActivity(token);
@@ -2281,7 +2287,7 @@ wss.on('connection', (ws, req) => {
                         toInstance: targetToken,
                         fromInstance: token,
                         fromPubkey: tokenToPubkey.get(token) || null,
-                        message: message.message,
+                        message: wireBody.toJson(message.message),
                         rid
                     })) {
                         const timer = setTimeout(() => pendingRelays.delete(rid), 15000);
@@ -2300,11 +2306,7 @@ wss.on('connection', (ws, req) => {
                 }
 
                 // Enviar el mensaje al destinatario
-                targetConn.ws.send(JSON.stringify({
-                    type: 'message',
-                    from: token,
-                    message: message.message
-                }));
+                wireBody.sendMessage(targetConn.ws, { type: 'message', from: token }, message.message);
 
                 // Registrar el par de conexión
                 const pairKey = createPairKey(token, targetToken);
@@ -3360,12 +3362,7 @@ wss.on('connection', (ws, req) => {
                 // Fan-out: una entrega por cada instancia activa de la pubkey.
                 for (const { token: targetToken, conn } of liveConns) {
                     try {
-                        conn.ws.send(JSON.stringify({
-                            type: 'message',
-                            from: ws.token,
-                            from_publickey: senderPubkey,
-                            message: message.message
-                        }));
+                        wireBody.sendMessage(conn.ws, { type: 'message', from: ws.token, from_publickey: senderPubkey }, message.message);
                         connectionPairs.add(createPairKey(ws.token, targetToken));
                         anySent = true;
                         totalDeliveries++;

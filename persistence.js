@@ -1,5 +1,7 @@
 'use strict';
 
+const { toJson, fromJson } = require('./body');
+
 // Persistencia durable del proxy usando el SQLite nativo de Node (node:sqlite,
 // Node >= 22.5). Solo persistimos lo que NO es efímero:
 //   - push_subscriptions: pubkey -> PushSubscription (perderlas = no timbrar)
@@ -232,7 +234,7 @@ function loadOfflineQueue(now) {
         if (!out.has(r.pubkey)) out.set(r.pubkey, []);
         let message = r.message;
         if (r.cid) message = undefined;
-        else { try { message = JSON.parse(r.message); } catch (_) { /* fila legacy en texto plano */ } }
+        else { try { message = fromJson(JSON.parse(r.message)); } catch (_) { /* fila legacy en texto plano */ } }
         out.get(r.pubkey).push({
             id: r.id,
             from: r.from_token,
@@ -251,7 +253,9 @@ function loadOfflineQueue(now) {
 function insertQueued(pubkey, item) {
     // `message` puede ser objeto; SQLite solo bindea texto/números → serializamos
     // siempre a JSON (y se parsea al rehidratar). Round-trip estable.
-    const msgText = item.cid ? 'null' : JSON.stringify(item.message);
+    // Un cuerpo en bytes (body.js) va en base64 marcado: JSON.stringify de un Buffer lo
+    // escribiría como una lista de números.
+    const msgText = item.cid ? 'null' : JSON.stringify(toJson(item.message));
     const info = db.prepare(`
         INSERT INTO offline_queue (pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app, cid)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
