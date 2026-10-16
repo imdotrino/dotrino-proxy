@@ -641,7 +641,7 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
     if (mesh.hasLinks()) {
         // Un efímero NO se guarda para reenviar: si el enlace está caído, para
         // cuando vuelva ya no sirve. Se intenta ahora o no se intenta.
-        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: wireBody.toJson(msgBody), queuedAt, expiresAt, ephemeral, quiet, app }, { retain: !ephemeral });
+        mesh.broadcastDeliver({ toPubkey, fromPubkey, message: msgBody, queuedAt, expiresAt, ephemeral, quiet, app }, { retain: !ephemeral });
         return;
     }
 
@@ -2287,7 +2287,7 @@ wss.on('connection', (ws, req) => {
                         toInstance: targetToken,
                         fromInstance: token,
                         fromPubkey: tokenToPubkey.get(token) || null,
-                        message: wireBody.toJson(message.message),
+                        message: message.message,
                         rid
                     })) {
                         const timer = setTimeout(() => pendingRelays.delete(rid), 15000);

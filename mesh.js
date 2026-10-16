@@ -26,6 +26,33 @@
  */
 const WebSocket = require('ws');
 const { signBody, verifyBody, newNonce } = require('./nodeIdentity');
+const { encodeFrame, decodeFrame } = require('./body');
+
+// El mismo tope de trama que el servidor (server.js): el otro nodo corta la conexión con
+// una trama más grande, y el enlace la reenviaría al reconectar, en bucle.
+const MAX_FRAME_BYTES = Number(process.env.PROXY_MAX_FRAME_BYTES || 1024 * 1024);
+
+/**
+ * Una trama de la malla en el cable: JSON, o BINARIA si lleva un mensaje en bytes (body.js).
+ * En base64 una parte de 768 KB ocupa más de 1 MB y no cabe en la trama; así viaja en crudo.
+ */
+function serializeFrame(obj) {
+    const m = obj && obj.payload && obj.payload.message;
+    if (!Buffer.isBuffer(m)) return JSON.stringify(obj);
+    const { message, ...rest } = obj.payload;
+    return encodeFrame({ ...obj, payload: rest, binaryMessage: true }, m);
+}
+
+/** El inverso de `serializeFrame`. Lanza si no es una trama válida. */
+function parseFrame(raw, isBinary) {
+    if (!isBinary) return JSON.parse(raw.toString());
+    const { header, body } = decodeFrame(raw);
+    if (header.binaryMessage && header.payload && typeof header.payload === 'object') {
+        header.payload.message = Buffer.from(body);
+    }
+    delete header.binaryMessage;
+    return header;
+}
 
 const S2S_PATH = '/_s2s';
 const HELLO_TIMEOUT_MS = 10000;
@@ -154,8 +181,8 @@ class MeshLink {
             if (!this.ready) { try { ws.close(); } catch (_) {} }
         }, HELLO_TIMEOUT_MS);
 
-        ws.on('message', (raw) => {
-            let f; try { f = JSON.parse(raw.toString()); } catch (_) { return; }
+        ws.on('message', (raw, isBinary) => {
+            let f; try { f = parseFrame(raw, isBinary); } catch (_) { return; }
             if (f.t === 'challenge') {
                 const body = { v: 1, op: 's2s-hello', from: this.identity.pubkey, nodeId: this.identity.nodeId, nonce: f.nonce, ts: Date.now() };
                 this._raw({ t: 'hello', body, signature: signBody(this.identity, body) });
@@ -200,7 +227,17 @@ class MeshLink {
 
     _raw(obj) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-        try { this.ws.send(JSON.stringify(obj)); return true; } catch (_) { return false; }
+        const data = serializeFrame(obj);
+        // Una trama que el otro nodo no acepta NO se guarda para reenviar: le cerraría el
+        // enlace en cada reconexión y dejaría atascado todo lo que va detrás. Se dice y se suelta.
+        const size = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
+        if (size > MAX_FRAME_BYTES) {
+            if (obj.seq != null) this.retain.delete(obj.seq);
+            this.stats.tooBig = (this.stats.tooBig || 0) + 1;
+            console.error(`[mesh] dropped a ${obj.op || obj.t} frame of ${size} bytes to ${this.url}: the limit is ${MAX_FRAME_BYTES}`);
+            return false;
+        }
+        try { this.ws.send(data); return true; } catch (_) { return false; }
     }
 
     _onAck(seq) {
@@ -453,7 +490,7 @@ class Mesh {
         }, HELLO_TIMEOUT_MS);
         if (timer.unref) timer.unref();
 
-        const send = (o) => { try { ws.send(JSON.stringify(o)); } catch (_) {} };
+        const send = (o) => { try { ws.send(serializeFrame(o)); } catch (_) {} };
 
         // Canal de RESPUESTA por el mismo socket entrante. Hace falta porque hay
         // operaciones que piden una contestación (el canje de una cita, por
@@ -466,8 +503,8 @@ class Mesh {
 
         send({ t: 'challenge', nonce });
 
-        ws.on('message', (raw) => {
-            let f; try { f = JSON.parse(raw.toString()); } catch (_) { return; }
+        ws.on('message', (raw, isBinary) => {
+            let f; try { f = parseFrame(raw, isBinary); } catch (_) { return; }
 
             if (!peer) {
                 if (f.t !== 'hello') return;

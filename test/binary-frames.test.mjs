@@ -61,13 +61,21 @@ describe('binary frames', () => {
         await x.close();
     });
 
-    it('to an instance of the OTHER node, through the mesh', async () => {
+    // 900 KB: in base64 it would not fit the 1 MB frame of the other node, which closed the
+    // mesh link on every reconnect and left everything behind it stuck (1.6.0, fixed in 1.6.1).
+    it('to an instance of the OTHER node, through the mesh, raw and close to the frame limit', async () => {
         const x = await connectTo(a.url);
         const y = await connectTo(b.url);
-        const data = bytes(300 * 1024);
+        const data = bytes(900 * 1024);
         x.sendBinary({ to: [y.token] }, data);
         const got = await y.waitFor((m) => m.type === 'message' && m.binary);
         expect(Buffer.compare(got.message, data)).toBe(0);
+        // The link is still up: a text message right after it arrives too.
+        x.send({ to: [y.token], message: '{"after":1}' });
+        const after = await y.waitFor((m) => m.type === 'message' && m.message === '{"after":1}');
+        expect(after.from).toBe(x.token);
+        const peers = await fetch(`${a.http}/peers`).then((r) => r.json());
+        expect(Object.values(peers.mesh).every((l) => l.ready && !l.tooBig)).toBe(true);
         await Promise.all([x.close(), y.close()]);
     });
 
@@ -91,7 +99,7 @@ describe('binary frames', () => {
         const bob = makeUser();
         const y = await connectIdentified(b.url, bob);
         const x = await connectIdentified(a.url, alice);
-        const data = bytes(100 * 1024);
+        const data = bytes(900 * 1024);
         x.sendBinary({ to_publickey: [bob.publickey] }, data);
         const got = await y.waitFor((m) => m.type === 'message' && m.binary);
         expect(Buffer.compare(got.message, data)).toBe(0);

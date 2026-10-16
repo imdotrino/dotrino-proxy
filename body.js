@@ -13,9 +13,10 @@
  * otra punta del mismo cable.
  *
  * Dentro del proxio el cuerpo es una cadena (texto, como siempre) o un `Buffer` (bytes). Se
- * entrega como llegó: texto en texto y bytes en una trama binaria. Por donde solo cabe JSON
- * —la malla entre nodos, el POST de federación, la fila de SQLite— los bytes viajan en base64
- * dentro de `{ __dotrino_bin_b64 }`, y se vuelven `Buffer` al otro lado.
+ * entrega como llegó: texto en texto y bytes en una trama binaria. La malla entre nodos también
+ * los lleva en crudo (mesh.js): en base64 una parte de 768 KB no cabe en la trama de 1 MB. Por
+ * donde solo cabe JSON —el POST de federación, la fila de SQLite— viajan en base64 dentro de
+ * `{ __dotrino_bin_b64 }`, y se vuelven `Buffer` al otro lado.
  */
 
 const FRAME_VERSION = 0x01;
