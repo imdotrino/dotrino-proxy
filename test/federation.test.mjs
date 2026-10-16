@@ -174,6 +174,21 @@ describe('federación entre dos nodos', () => {
             await ca.close();
         });
 
+        it('una instancia de otro nodo que YA SE FUE vuelve como failed, no muere callada', async () => {
+            // Sin esto el cliente creía entregado lo que iba a un token muerto del otro nodo, y
+            // no lo reenviaba a la cola por pubkey (así se perdía una foto para alguien que
+            // había cerrado la app).
+            const ca = await connectTo(a.url);
+            const dead = ca.token;
+            await ca.close();
+            await sleep(300);
+            const cb = await connectTo(b.url);
+            cb.send({ to: [dead], message: 'para alguien que se fue', id: 'dead-1' });
+            const res = await cb.waitFor((m) => m.type === 'message_sent' && m.id === 'dead-1', 8000);
+            expect(res.failed).toEqual([dead]);
+            await cb.close();
+        });
+
         it('escribirle a una instancia de un nodo desconocido falla', async () => {
             const cb = await connectTo(b.url);
             const deNadie = 'YYYYYYYYYYYYinstanciaDeNadie12345';

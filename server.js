@@ -135,8 +135,28 @@ const mesh = new Mesh({
     },
     // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
     onRelay: (payload, link) => {
-        try { deliverRelayed(payload, link); }
+        try {
+            const r = deliverRelayed(payload, link);
+            // La instancia ya no está aquí: se le dice al nodo que lo mandó, que se lo dice a
+            // quien escribió (`message_sent.failed`). Sin esto el mensaje moría callado, y el
+            // cliente no lo reenviaba a la cola por pubkey.
+            if (r.failed && payload && payload.rid) {
+                link.send('relay-failed', { rid: payload.rid, toInstance: payload.toInstance }, { retain: false });
+            }
+        }
         catch (e) { console.warn('[mesh] relay failed:', e.message); }
+    },
+    // El nodo dueño dice que la instancia a la que relayamos ya no existe.
+    onRelayFailed: (payload) => {
+        try {
+            const pending = pendingRelays.get(payload && payload.rid);
+            if (!pending) return;
+            clearTimeout(pending.timer);
+            pendingRelays.delete(payload.rid);
+            const response = { type: 'message_sent', sent: 0, total: 1, failed: [pending.toInstance] };
+            applyMessageIds(response, pending.message);
+            try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
+        } catch (e) { console.warn('[mesh] relay-failed failed:', e.message); }
     },
     // Un peer nos avisa que una instancia suya, con la que teníamos par, se fue.
     onPeerGone: (payload) => {
@@ -314,6 +334,11 @@ function applyFederationConfig(log = console.log) {
 // Citas de emparejamiento: el código corto que ve un humano. Ver pairingCodes.js.
 const { PairingCodes } = require('./pairingCodes');
 const pairingCodes = new PairingCodes();
+
+// Mensajes relayados a una instancia de otro nodo, esperando por si el dueño dice que ya
+// no existe: rid -> { ws, message, toInstance, timer }. Si en 15 s no dice nada, llegó.
+const pendingRelays = new Map();
+let relaySeq = 0;
 
 // Canjes de cita esperando respuesta del nodo dueño: id -> {ws, message, timer}
 const pendingRedeems = new Map();
@@ -2251,12 +2276,17 @@ wss.on('connection', (ws, req) => {
                     // Esto es lo que antes no existía: un mensaje dirigido a una
                     // conexión de otro proxio moría acá mismo, en `failedTokens`.
                     const owner = ownerNodeOf(targetToken);
+                    const rid = `r${++relaySeq}`;
                     if (owner && mesh.relayTo(owner.pubkey, {
                         toInstance: targetToken,
                         fromInstance: token,
                         fromPubkey: tokenToPubkey.get(token) || null,
-                        message: message.message
+                        message: message.message,
+                        rid
                     })) {
+                        const timer = setTimeout(() => pendingRelays.delete(rid), 15000);
+                        if (timer.unref) timer.unref();
+                        pendingRelays.set(rid, { ws, message, toInstance: targetToken, timer });
                         // El par se registra en los DOS nodos: acá con la instancia
                         // remota, y allá al entregar. Así la baja de cualquiera de
                         // los dos lados avisa al otro.

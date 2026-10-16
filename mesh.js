@@ -53,6 +53,7 @@ const S2S_LIMITS = {
     'chan-result': { burst: 200, ratePerSec: 50 },
     'chan-event':  { burst: 400, ratePerSec: 200 },
     'peer-gone':   { burst: 200, ratePerSec: 50 },
+    'relay-failed': { burst: 600, ratePerSec: 300 },
     // ESTRICTO: canjear una cita es un acto humano, no de máquina. Ni el peer
     // más ocupado necesita más de unos pocos por segundo.
     'pair-redeem': { burst: 20, ratePerSec: 2 },
@@ -245,13 +246,14 @@ class MeshLink {
 
 /** La malla completa: enlaces salientes + atención de los entrantes. */
 class Mesh {
-    constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onPeerGone,
+    constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onRelayFailed, onPeerGone,
                   onPairRedeem, onPairResult, onChanOp, onChanResult, onChanEvent, onEncPub,
                   log = console.log } = {}) {
         this.identity = identity;
         this.registry = registry;
         this.onDeliver = onDeliver;
         this.onRelay = onRelay || (() => {});
+        this.onRelayFailed = onRelayFailed || (() => {});
         this.onPeerGone = onPeerGone || (() => {});
         this.onPairRedeem = onPairRedeem || (() => {});
         this.onPairResult = onPairResult || (() => {});
@@ -341,6 +343,7 @@ class Mesh {
     _handleFrame(frame, link) {
         if (frame.op === 'deliver') this.onDeliver(frame.payload, link);
         else if (frame.op === 'relay') this.onRelay(frame.payload, link);
+        else if (frame.op === 'relay-failed') this.onRelayFailed(frame.payload, link);
         else if (frame.op === 'peer-gone') this.onPeerGone(frame.payload, link);
         else if (frame.op === 'pair-redeem') this.onPairRedeem(frame.payload, link);
         else if (frame.op === 'pair-result') this.onPairResult(frame.payload, link);
