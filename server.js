@@ -727,14 +727,16 @@ function bytesOfMessage(m) {
 
 /** Saca de la cuenta, del disco y del content lo que ya se entregó o se descartó. */
 function forgetQueued(items) {
-    if (!items.length) return;
+    if (!items.length) return Promise.resolve();
     const ids = [];
+    const removing = [];
     for (const item of items) {
         totalQueueBytes -= item.bytes || 0;
         if (item.id != null) ids.push(item.id);
-        if (item.cid && contentQueue) contentQueue.remove(item.cid);
+        if (item.cid && contentQueue) removing.push(contentQueue.remove(item.cid));
     }
     persist.deleteQueuedByIds(ids);
+    return Promise.all(removing);
 }
 
 function trimQueueByCaps(pubkey) {
@@ -756,19 +758,23 @@ function evictGloballyIfOverCap() {
     if (totalQueueBytes <= MAX_TOTAL_QUEUE_BYTES) return;
     // Encuentra entradas más viejas a través de todas las colas y descarta
     // hasta volver bajo el límite.
-    while (totalQueueBytes > MAX_TOTAL_QUEUE_BYTES) {
-        let oldestPk = null;
-        let oldestTs = Infinity;
-        for (const [pk, q] of offlineQueues) {
-            if (q.length && q[0].queuedAt < oldestTs) {
-                oldestTs = q[0].queuedAt;
-                oldestPk = pk;
-            }
-        }
-        if (!oldestPk) break;
-        forgetQueued([offlineQueues.get(oldestPk).shift()]);
-        if (offlineQueues.get(oldestPk).length === 0) offlineQueues.delete(oldestPk);
+    while (totalQueueBytes > MAX_TOTAL_QUEUE_BYTES && dropOldestQueued('offline queue over its total cap')) { /* FIFO */ }
+}
+
+/** Descarta el mensaje encolado más viejo de todas las colas (promesa de su borrado), o false si no queda ninguno. */
+function dropOldestQueued(reason) {
+    let oldestPk = null;
+    let oldestTs = Infinity;
+    for (const [pk, q] of offlineQueues) {
+        if (q.length && q[0].queuedAt < oldestTs) { oldestTs = q[0].queuedAt; oldestPk = pk; }
     }
+    if (!oldestPk) return false;
+    const q = offlineQueues.get(oldestPk);
+    const item = q.shift();
+    if (q.length === 0) offlineQueues.delete(oldestPk);
+    console.warn(`[queue] ${reason}: dropped the oldest queued message (${new Date(item.queuedAt).toISOString()})`);
+    // Devuelve el borrado en el node, para que quien hace sitio pueda esperarlo.
+    return forgetQueued([item]);
 }
 
 /** Mete `items` en la cola de `pubkey` respetando el orden de llegada. */
@@ -787,7 +793,17 @@ function placeQueued(pubkey, items) {
  */
 async function enqueueOffline(recipientPubkey, queued) {
     if (contentQueue) {
-        queued.cid = await contentQueue.put(recipientPubkey, queued.message, queued.expiresAt);
+        // Disco en riesgo (el node contesta 507): se borra lo más viejo de la cola, en orden
+        // de llegada, hasta que el nuevo quepa. Es la misma regla que el vencimiento y los
+        // topes (dueño, 2026-10-15): lo en tránsito es temporal, y cede lo más antiguo.
+        for (;;) {
+            try { queued.cid = await contentQueue.put(recipientPubkey, queued.message, queued.expiresAt); break; }
+            catch (e) {
+                const freed = e.code === 'queue-full' && dropOldestQueued('content node is out of space');
+                if (!freed) throw e;
+                await freed;
+            }
+        }
         delete queued.message;
     }
     // Persistir primero para obtener el id de fila; así un evict/flush posterior

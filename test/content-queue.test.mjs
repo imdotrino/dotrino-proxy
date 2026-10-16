@@ -31,7 +31,7 @@ const enrollTo = (dir, account) => {
     fs.writeFileSync(f, JSON.stringify({ ...rec, iss: account.iss }));
 };
 
-function fakeContentNode(owner) {
+function fakeContentNode(owner, { capacity = Infinity } = {}) {
     const blobs = new Map();
     const log = [];
     const server = http.createServer((req, res) => {
@@ -47,6 +47,8 @@ function fakeContentNode(owner) {
             req.on('data', (c) => chunks.push(c));
             req.on('end', () => {
                 const bytes = Buffer.concat(chunks);
+                const used = [...blobs.values()].reduce((a, b) => a + b.bytes.length, 0);
+                if (used + bytes.length > capacity) { res.writeHead(507); return res.end('{"error":"disk quota exceeded"}'); }
                 const id = 'sha256-' + crypto.createHash('sha256').update(bytes).digest('hex');
                 blobs.set(id, { bytes, enc: url.searchParams.get('enc'), ttl: Number(url.searchParams.get('ttl')) });
                 res.writeHead(201, { 'content-type': 'application/json' });
@@ -82,20 +84,25 @@ describe('cola offline en el content de la cuenta', () => {
     const account = makeAccount();
     const content = fakeContentNode(account.owner);
     const otherContent = fakeContentNode(makeAccount().owner);
-    let node, foreign;
+    // Espacio para dos mensajes grandes y no tres.
+    const smallContent = fakeContentNode(account.owner, { capacity: 1400 * 1024 });
+    let node, foreign, small;
     const dirs = [];
 
     beforeAll(async () => {
-        const [url, otherUrl] = [await listen(content.server), await listen(otherContent.server)];
-        for (const n of ['cq-mine', 'cq-foreign']) { const d = makeNodeDir(n); enrollTo(d, account); dirs.push(d); }
+        const [url, otherUrl, smallUrl] = [await listen(content.server), await listen(otherContent.server), await listen(smallContent.server)];
+        for (const n of ['cq-mine', 'cq-foreign', 'cq-small']) { const d = makeNodeDir(n); enrollTo(d, account); dirs.push(d); }
         node = await startNode({ name: 'MINE', dir: dirs[0], env: { PROXY_CONTENT_URL: url } });
         foreign = await startNode({ name: 'FOREIGN', dir: dirs[1], env: { PROXY_CONTENT_URL: otherUrl } });
-        await waitUntil(async () => (await fetch(`${node.http}/health`).then((r) => r.json())).queue === 'content');
+        small = await startNode({ name: 'SMALL', dir: dirs[2], env: { PROXY_CONTENT_URL: smallUrl } });
+        for (const n of [node, small]) {
+            await waitUntil(async () => (await fetch(`${n.http}/health`).then((r) => r.json())).queue === 'content');
+        }
     }, 30000);
 
     afterAll(async () => {
-        await Promise.all([node?.stop(), foreign?.stop()]);
-        content.server.close(); otherContent.server.close();
+        await Promise.all([node?.stop(), foreign?.stop(), small?.stop()]);
+        content.server.close(); otherContent.server.close(); smallContent.server.close();
         for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
     });
 
@@ -141,5 +148,20 @@ describe('cola offline en el content de la cuenta', () => {
         expect(r.code).toBe('queue-unavailable');
         expect(otherContent.log.some((l) => l.startsWith('POST /c'))).toBe(false);
         await a.close();
+    });
+
+    it('con el disco del node lleno, cede lo más viejo (FIFO) y el nuevo entra', async () => {
+        const alice = makeUser();
+        const bob = makeUser();
+        const a = await connectIdentified(small.url, alice);
+        const big = (n) => ({ sealed: true, n, blob: crypto.randomBytes(450 * 1024).toString('base64') });
+        for (const n of [1, 2, 3]) {
+            a.send({ to_publickey: [bob.publickey], message: big(n) });
+            await a.waitFor((m) => m.type === 'message_sent' && m.queued?.length === 1 && a.recv.filter((x) => x.type === 'message_sent').length === n);
+        }
+        expect(smallContent.blobs.size).toBe(2);
+        const b = await connectIdentified(small.url, bob);
+        expect(b.recv.filter((m) => m.type === 'message' && m.queued).map((m) => m.message.n)).toEqual([2, 3]);
+        await Promise.all([a.close(), b.close()]);
     });
 });
