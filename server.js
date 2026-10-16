@@ -705,7 +705,9 @@ const contentQueue = PROXY_CONTENT_URL
 // proceso, y 1 MB por destinatario alcanza para texto. En el content caben imágenes: el
 // node tiene su propia cuota (`--max-gb`) y aquí solo se acota que nadie la acapare.
 const MAX_QUEUE_PER_PUBKEY = 200;                     // mensajes
-const MAX_BYTES_PER_PUBKEY = contentQueue ? 32 * 1024 * 1024 : 1 * 1024 * 1024;
+// 64 MB: el pilar deja esperar mensajes de hasta 8 MB de archivo (~14 MB sellados), y así
+// caben unos cuatro por destinatario.
+const MAX_BYTES_PER_PUBKEY = contentQueue ? 64 * 1024 * 1024 : 1 * 1024 * 1024;
 const MAX_TOTAL_QUEUE_BYTES = contentQueue ? 512 * 1024 * 1024 : 64 * 1024 * 1024;
 let totalQueueBytes = 0;
 
