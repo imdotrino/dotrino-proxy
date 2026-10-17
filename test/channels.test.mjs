@@ -181,9 +181,9 @@ describe('channels: publish / unpublish / list / channel_count', () => {
             expect(names).toContain('chat_room_prueba');
 
             const general = res.channels.find(ch => ch.name === 'chat_room_general');
-            const prueba = res.channels.find(ch => ch.name === 'chat_room_prueba');
+            const probe = res.channels.find(ch => ch.name === 'chat_room_prueba');
             expect(general.count).toBe(1);
-            expect(prueba.count).toBe(1);
+            expect(probe.count).toBe(1);
         });
 
         it('filtra por prefix y echoa el prefix en la respuesta', async () => {

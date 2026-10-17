@@ -26,9 +26,9 @@ describe('citas de emparejamiento (unidad)', () => {
 
     it('acepta el código tecleado en minúsculas, con espacios y guiones', () => {
         const { code } = codes.create({ instance: 'K7abc', hint: 'K7' });
-        const tecleado = code.slice(0, 3).toLowerCase() + '-' + code.slice(3).toLowerCase();
-        expect(normalizeCode(tecleado)).toBe(code);
-        expect(codes.redeem(tecleado).instance).toBe('K7abc');
+        const typed = code.slice(0, 3).toLowerCase() + '-' + code.slice(3).toLowerCase();
+        expect(normalizeCode(typed)).toBe(code);
+        expect(codes.redeem(typed).instance).toBe('K7abc');
     });
 
     it('caduca', () => {
@@ -79,7 +79,7 @@ describe('citas entre nodos', () => {
         for (;;) {
             const s = await Promise.all([a, b].map((n) => fetch(`${n.http}/peers`).then(r => r.json()).catch(() => null)));
             if (s.every((x) => x && x.peers?.length && Object.values(x.mesh || {}).some((m) => m.ready))) break;
-            if (Date.now() > deadline) throw new Error('la malla no se estableció');
+            if (Date.now() > deadline) throw new Error('the mesh did not come up');
             await sleep(300);
         }
     }, 60000);
@@ -129,8 +129,8 @@ describe('citas entre nodos', () => {
         cb.send({ type: 'pair-redeem', code, id: 'x1' });
         expect((await cb.waitFor((m) => m.type === 'pair-redeem' && m.id === 'x1', 10000)).ok).toBe(true);
         cb.send({ type: 'pair-redeem', code, id: 'x2' });
-        const segundo = await cb.waitFor((m) => m.type === 'pair-redeem' && m.id === 'x2', 10000);
-        expect(segundo.ok).toBe(false);
+        const second = await cb.waitFor((m) => m.type === 'pair-redeem' && m.id === 'x2', 10000);
+        expect(second.ok).toBe(false);
         await ca.close(); await cb.close();
     }, 30000);
 
@@ -138,8 +138,8 @@ describe('citas entre nodos', () => {
         const cb = await connectTo(b.url);
         // Un filtro que no coincide con NINGÚN nodo conocido: ni siquiera hay a
         // quién preguntarle, así que se rechaza sin pregonarlo a la malla.
-        const ajeno = ['YY', 'XX', 'WW'].find((h) => h !== a.hint && h !== b.hint);
-        cb.send({ type: 'pair-redeem', code: ajeno + '1234', id: 'unk' });
+        const foreign = ['YY', 'XX', 'WW'].find((h) => h !== a.hint && h !== b.hint);
+        cb.send({ type: 'pair-redeem', code: foreign + '1234', id: 'unk' });
         const res = await cb.waitFor((m) => m.type === 'pair-redeem', 10000);
         expect(res.ok).toBe(false);
         expect(['unknown-code-node', 'invalid-code']).toContain(res.code);
@@ -181,7 +181,7 @@ describe('filtro compartido y desambiguación', () => {
         for (;;) {
             const s = await Promise.all([a, b].map((n) => fetch(`${n.http}/peers`).then(r => r.json()).catch(() => null)));
             if (s.every((x) => x && x.peers?.length && Object.values(x.mesh || {}).some((m) => m.ready))) break;
-            if (Date.now() > deadline) throw new Error('la malla no se estableció');
+            if (Date.now() > deadline) throw new Error('the mesh did not come up');
             await sleep(300);
         }
     }, 60000);

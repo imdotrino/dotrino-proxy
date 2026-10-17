@@ -61,11 +61,11 @@ function canonicalStringify(obj) {
 function canonicalPubkeyBytes(pubkeyJson) {
     const jwk = typeof pubkeyJson === 'string' ? JSON.parse(pubkeyJson) : pubkeyJson;
     if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || !jwk.x || !jwk.y) {
-        throw new Error('pubkey no es una JWK EC P-256');
+        throw new Error('pubkey is not an EC P-256 JWK');
     }
     const x = Buffer.from(jwk.x, 'base64url');
     const y = Buffer.from(jwk.y, 'base64url');
-    if (x.length !== 32 || y.length !== 32) throw new Error('coordenadas de longitud inesperada');
+    if (x.length !== 32 || y.length !== 32) throw new Error('coordinates of unexpected length');
     const prefix = (y[31] & 1) === 0 ? 0x02 : 0x03;
     return Buffer.concat([Buffer.from([prefix]), x]);
 }

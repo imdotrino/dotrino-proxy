@@ -21,13 +21,13 @@ import { actaBody } from '@dotrino/identity/acta'
  * firme—. Y esas son exactamente las que tiene que rechazar el proxio: quien ataca no pasa
  * por nuestro validador.
  */
-async function acta ({ sellador, miembros, renounced = [], v = 5, firmante = null }) {
-  const cuerpo = {
+async function acta ({ sealerKey, memberList, renounced = [], v = 5, signer = null }) {
+  const body = {
     v,
-    profileId: sellador.publickey,
-    sealedBy: sellador.publickey,
+    profileId: sealerKey.publickey,
+    sealedBy: sealerKey.publickey,
     seq: 1,
-    members: miembros,
+    members: memberList,
     renounced,
     keyring: [],
     sealPub: null,
@@ -35,104 +35,104 @@ async function acta ({ sellador, miembros, renounced = [], v = 5, firmante = nul
     sealKeys: [],
     updatedAt: Date.now()
   }
-  const quien = firmante || sellador
-  const { signature } = await signWithDevice({ privateJwk: quien.privateJwk, publickey: cuerpo.sealedBy, data: actaBody(cuerpo) })
-  return { ...cuerpo, sig: signature }
+  const who = signer || sealerKey
+  const { signature } = await signWithDevice({ privateJwk: who.privateJwk, publickey: body.sealedBy, data: actaBody(body) })
+  return { ...body, sig: signature }
 }
 
 describe('verifyActaMembership', () => {
   it('un acta v5 vale, y ata el perfil del miembro que habla', async () => {
     const master = await makeDeviceKey()
-    const tel = await makeDeviceKey()
+    const phone = await makeDeviceKey()
     const a = await acta({
-      sellador: master,
-      miembros: [
+      sealerKey: master,
+      memberList: [
         { pub: master.publickey, caps: ['sign', 'read', 'store', 'sealer'] },
-        { pub: tel.publickey, caps: ['sign', 'read'] }
+        { pub: phone.publickey, caps: ['sign', 'read'] }
       ]
     })
     // Lo que importa: habla el TELÉFONO, que no sella nada, y aun así el proxio le ata el
     // perfil. Eso es lo que deja que la bóveda hable con una llave que no es la maestra.
-    expect(verifyActaMembership(a, tel.publickey)).toBe(master.publickey)
+    expect(verifyActaMembership(a, phone.publickey)).toBe(master.publickey)
     expect(verifyActaMembership(a, master.publickey)).toBe(master.publickey)
   })
 
   it('se leen las versiones que existen, no una del futuro', async () => {
     const master = await makeDeviceKey()
-    const miembros = [{ pub: master.publickey, caps: ['sign', 'sealer'] }]
+    const memberList = [{ pub: master.publickey, caps: ['sign', 'sealer'] }]
     for (const v of [3, 4, 5]) {
-      const a = await acta({ sellador: master, miembros, v })
+      const a = await acta({ sealerKey: master, memberList, v })
       expect(verifyActaMembership(a, master.publickey), `v${v}`).toBe(master.publickey)
     }
     // Una v6 se rechaza en vez de intentar leerla a ciegas: el proxio no sabe qué campos
     // trae ni qué significan, y adivinar es peor que decir que no.
-    const futura = await acta({ sellador: master, miembros, v: 6 })
-    expect(verifyActaMembership(futura, master.publickey)).toBe(null)
+    const future = await acta({ sealerKey: master, memberList, v: 6 })
+    expect(verifyActaMembership(future, master.publickey)).toBe(null)
   })
 
   it('NO se puede secuestrar el perfil de otro fabricando un acta', async () => {
-    const victima = await makeDeviceKey()
-    const atacante = await makeDeviceKey()
+    const victim = await makeDeviceKey()
+    const attacker = await makeDeviceKey()
     // El acta dice el perfil de la víctima; la sella el atacante, que se nombra sellador a
     // sí mismo. La firma cuadra —la hizo él—, el permiso cuadra —se lo puso él— y aun así
     // no vale: quien selló no es la llave que da nombre al perfil.
-    const falsa = await acta({
-      sellador: atacante,
-      miembros: [{ pub: atacante.publickey, caps: ['sign', 'sealer'] }]
+    const forged = await acta({
+      sealerKey: attacker,
+      memberList: [{ pub: attacker.publickey, caps: ['sign', 'sealer'] }]
     })
-    falsa.profileId = victima.publickey
-    const refirmada = await acta({
-      sellador: atacante,
-      miembros: [{ pub: atacante.publickey, caps: ['sign', 'sealer'] }]
+    forged.profileId = victim.publickey
+    const resigned = await acta({
+      sealerKey: attacker,
+      memberList: [{ pub: attacker.publickey, caps: ['sign', 'sealer'] }]
     })
     // Bien firmada de arriba abajo, solo que con el `profileId` de la víctima dentro.
-    const cuerpo = { ...refirmada, profileId: victima.publickey }
+    const body = { ...resigned, profileId: victim.publickey }
     const { signature } = await signWithDevice({
-      privateJwk: atacante.privateJwk, publickey: atacante.publickey, data: actaBody(cuerpo)
+      privateJwk: attacker.privateJwk, publickey: attacker.publickey, data: actaBody(body)
     })
-    const bienFirmada = { ...cuerpo, sig: signature }
+    const wellSigned = { ...body, sig: signature }
 
-    expect(verifyActaMembership(falsa, atacante.publickey)).toBe(null)
-    expect(verifyActaMembership(bienFirmada, atacante.publickey)).toBe(null)
+    expect(verifyActaMembership(forged, attacker.publickey)).toBe(null)
+    expect(verifyActaMembership(wellSigned, attacker.publickey)).toBe(null)
     // Y para que quede claro que no es la firma lo que lo salva: con SU propio perfil sí.
-    expect(verifyActaMembership(refirmada, atacante.publickey)).toBe(atacante.publickey)
+    expect(verifyActaMembership(resigned, attacker.publickey)).toBe(attacker.publickey)
   })
 
   it('quien la selló TIENE que poder sellar, o no vale', async () => {
     const master = await makeDeviceKey()
-    const tel = await makeDeviceKey()
+    const phone = await makeDeviceKey()
     // El teléfono se fabrica un acta donde él es el perfil… pero se nombra sin `sealer`.
     // La firma cuadra (la hizo él); lo que no cuadra es la autoridad.
-    const suya = await acta({
-      sellador: tel,
-      miembros: [{ pub: tel.publickey, caps: ['sign', 'read'] }]
+    const theirs = await acta({
+      sealerKey: phone,
+      memberList: [{ pub: phone.publickey, caps: ['sign', 'read'] }]
     })
-    expect(verifyActaMembership(suya, tel.publickey)).toBe(null)
+    expect(verifyActaMembership(theirs, phone.publickey)).toBe(null)
   })
 
   it('una firma que no es de quien dice no vale', async () => {
     const master = await makeDeviceKey()
-    const otro = await makeDeviceKey()
-    const a = await acta({ sellador: master, miembros: [{ pub: master.publickey, caps: ['sealer'] }] })
+    const other = await makeDeviceKey()
+    const a = await acta({ sealerKey: master, memberList: [{ pub: master.publickey, caps: ['sealer'] }] })
     // Firmada por OTRO, diciendo que la firmó el master.
-    const suplantada = await acta({ sellador: master, miembros: [{ pub: master.publickey, caps: ['sealer'] }], firmante: otro })
-    expect(verifyActaMembership(suplantada, master.publickey)).toBe(null)
+    const impersonated = await acta({ sealerKey: master, memberList: [{ pub: master.publickey, caps: ['sealer'] }], signer: other })
+    expect(verifyActaMembership(impersonated, master.publickey)).toBe(null)
     // Y tocarle un campo después de firmada tampoco cuela.
     expect(verifyActaMembership({ ...a, seq: 99 }, master.publickey)).toBe(null)
   })
 
   it('quien no es miembro no ata nada', async () => {
     const master = await makeDeviceKey()
-    const extrano = await makeDeviceKey()
-    const a = await acta({ sellador: master, miembros: [{ pub: master.publickey, caps: ['sealer'] }] })
-    expect(verifyActaMembership(a, extrano.publickey)).toBe(null)
+    const stranger = await makeDeviceKey()
+    const a = await acta({ sealerKey: master, memberList: [{ pub: master.publickey, caps: ['sealer'] }] })
+    expect(verifyActaMembership(a, stranger.publickey)).toBe(null)
   })
 
   it('una renuncia al permiso de sellar se resta', async () => {
     const master = await makeDeviceKey()
     const a = await acta({
-      sellador: master,
-      miembros: [{ pub: master.publickey, caps: ['sign', 'sealer'] }],
+      sealerKey: master,
+      memberList: [{ pub: master.publickey, caps: ['sign', 'sealer'] }],
       renounced: [{ member: master.publickey, caps: ['sealer'] }]
     })
     expect(verifyActaMembership(a, master.publickey)).toBe(null)

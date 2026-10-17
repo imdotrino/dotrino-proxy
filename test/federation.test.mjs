@@ -32,9 +32,9 @@ describe('federación entre dos nodos', () => {
                 fetch(`${a.http}/peers`).then(r => r.json()).catch(() => ({ peers: [] })),
                 fetch(`${b.http}/peers`).then(r => r.json()).catch(() => ({ peers: [] }))
             ]);
-            const listo = (s) => s.peers?.length && Object.values(s.mesh || {}).some((m) => m.ready);
-            if (listo(pa) && listo(pb)) break;
-            if (Date.now() > deadline) throw new Error('la malla no se estableció a tiempo');
+            const isReady = (s) => s.peers?.length && Object.values(s.mesh || {}).some((m) => m.ready);
+            if (isReady(pa) && isReady(pb)) break;
+            if (Date.now() > deadline) throw new Error('the mesh did not come up in time');
             await sleep(300);
         }
     }, 60000);
@@ -92,7 +92,7 @@ describe('federación entre dos nodos', () => {
                 body: JSON.stringify({ body, signature: signBody(intruder, body) })
             });
             expect(res.status).toBe(401);
-            expect((await res.json()).error).toMatch(/desconocido/i);
+            expect((await res.json()).code).toBe('unknown-peer');
         });
 
         it('rechaza el viejo token simétrico compartido', async () => {
@@ -169,8 +169,8 @@ describe('federación entre dos nodos', () => {
             await ca.waitFor((m) => m.type === 'message');
             const goneInstance = cb.token;
             await cb.close();
-            const aviso = await ca.waitFor((m) => m.type === 'disconnected' && m.token === goneInstance, 8000);
-            expect(aviso.token).toBe(goneInstance);
+            const notice = await ca.waitFor((m) => m.type === 'disconnected' && m.token === goneInstance, 8000);
+            expect(notice.token).toBe(goneInstance);
             await ca.close();
         });
 
@@ -191,10 +191,10 @@ describe('federación entre dos nodos', () => {
 
         it('escribirle a una instancia de un nodo desconocido falla', async () => {
             const cb = await connectTo(b.url);
-            const deNadie = 'YYYYYYYYYYYYinstanciaDeNadie12345';
-            cb.send({ to: [deNadie], message: 'al vacío', id: 'nope-1' });
+            const fromNobody = 'YYYYYYYYYYYYinstanciaDeNadie12345';
+            cb.send({ to: [fromNobody], message: 'al vacío', id: 'nope-1' });
             const res = await cb.waitFor((m) => m.type === 'message_sent');
-            expect(res.failed).toContain(deNadie);
+            expect(res.failed).toContain(fromNobody);
             await cb.close();
         });
     });

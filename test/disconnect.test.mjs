@@ -54,7 +54,7 @@ describe('manual disconnect message', () => {
         const a = await connect();
         a.send({ type: 'disconnect', target: a.token });
         const err = await a.waitFor((m) => m.type === 'error');
-        expect(err.error).toMatch(/ti mismo/i);
+        expect(err.code).toBe('self-disconnect');
     });
 
     it('rechaza target inexistente', async () => {

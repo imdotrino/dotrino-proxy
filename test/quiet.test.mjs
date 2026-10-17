@@ -68,31 +68,31 @@ describe('envío callado (quiet)', () => {
     for (const [caso, idx] of [['sin federación', 0], ['con federación', 1]]) {
         it(`${caso}: callado se encola sin timbrar; normal timbra`, async () => {
             const node = nodes[idx];
-            const telefono = makeUser();
+            const phone = makeUser();
             // Se suscribe y se desconecta: queda «apagado», que es cuando se encola y timbra.
-            const ct = await connectIdentified(node.url, telefono);
-            await subscribe(ct, telefono);
+            const ct = await connectIdentified(node.url, phone);
+            await subscribe(ct, phone);
             await ct.close();
 
-            const bóveda = await connectTo(node.url);
+            const vault = await connectTo(node.url);
             let before = hits;
-            bóveda.send({ to_publickey: telefono.publickey, message: 'aviso-vars', quiet: true, id: 'q1' });
-            const r1 = await bóveda.waitFor((m) => m.type === 'message_sent' && m.id === 'q1');
-            expect(r1.queued).toContain(telefono.publickey);
+            vault.send({ to_publickey: phone.publickey, message: 'aviso-vars', quiet: true, id: 'q1' });
+            const r1 = await vault.waitFor((m) => m.type === 'message_sent' && m.id === 'q1');
+            expect(r1.queued).toContain(phone.publickey);
             expect(await hitsAfter(before)).toBe(0);
 
             before = hits;
-            bóveda.send({ to_publickey: telefono.publickey, message: 'pedido', id: 'n1' });
-            const r2 = await bóveda.waitFor((m) => m.type === 'message_sent' && m.id === 'n1');
-            expect(r2.queued).toContain(telefono.publickey);
+            vault.send({ to_publickey: phone.publickey, message: 'pedido', id: 'n1' });
+            const r2 = await vault.waitFor((m) => m.type === 'message_sent' && m.id === 'n1');
+            expect(r2.queued).toContain(phone.publickey);
             expect(await hitsAfter(before)).toBeGreaterThan(0);
 
             // Callar no es descartar: al volver, el teléfono recibe los dos.
-            const vuelve = await connectIdentified(node.url, telefono);
+            const returns = await connectIdentified(node.url, phone);
             const got = [];
-            for (let i = 0; i < 2; i++) got.push((await vuelve.waitFor((m) => m.type === 'message' && !got.includes(m.message))).message);
+            for (let i = 0; i < 2; i++) got.push((await returns.waitFor((m) => m.type === 'message' && !got.includes(m.message))).message);
             expect(got.sort()).toEqual(['aviso-vars', 'pedido']);
-            await vuelve.close(); await bóveda.close();
+            await returns.close(); await vault.close();
         }, 30000);
     }
     // EN VIVO TAMBIÉN TIMBRA: la conexión que el proxio cree viva puede estar muerta (un
@@ -101,26 +101,26 @@ describe('envío callado (quiet)', () => {
     for (const [caso, idx] of [['sin federación', 0], ['con federación', 1]]) {
         it(`${caso}: entregado en vivo timbra igual; callado y efímero no`, async () => {
             const node = nodes[idx];
-            const telefono = makeUser();
-            const ct = await connectIdentified(node.url, telefono);
-            await subscribe(ct, telefono);
-            const bóveda = await connectTo(node.url);
+            const phone = makeUser();
+            const ct = await connectIdentified(node.url, phone);
+            await subscribe(ct, phone);
+            const vault = await connectTo(node.url);
 
             let before = hits;
-            bóveda.send({ to_publickey: telefono.publickey, message: 'pedido', id: 'v1' });
+            vault.send({ to_publickey: phone.publickey, message: 'pedido', id: 'v1' });
             await ct.waitFor((m) => m.type === 'message' && m.message === 'pedido');
             expect(await hitsAfter(before)).toBeGreaterThan(0);
 
             before = hits;
-            bóveda.send({ to_publickey: telefono.publickey, message: 'callado', quiet: true, id: 'v2' });
+            vault.send({ to_publickey: phone.publickey, message: 'callado', quiet: true, id: 'v2' });
             await ct.waitFor((m) => m.type === 'message' && m.message === 'callado');
             expect(await hitsAfter(before)).toBe(0);
 
             before = hits;
-            bóveda.send({ to_publickey: telefono.publickey, message: 'jugada', ephemeral: true, id: 'v3' });
+            vault.send({ to_publickey: phone.publickey, message: 'jugada', ephemeral: true, id: 'v3' });
             await ct.waitFor((m) => m.type === 'message' && m.message === 'jugada');
             expect(await hitsAfter(before)).toBe(0);
-            await ct.close(); await bóveda.close();
+            await ct.close(); await vault.close();
         }, 30000);
     }
 });

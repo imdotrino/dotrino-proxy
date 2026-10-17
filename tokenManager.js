@@ -76,7 +76,7 @@ class TokenManager {
             const instance = this.generateInstance();
             if (!this.isTokenInUse(instance)) return instance;
         }
-        throw new Error('No se pudo generar una instancia única');
+        throw new Error('could not generate a unique instance');
     }
 
     // Asignar un token corto a una conexión

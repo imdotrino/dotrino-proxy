@@ -55,10 +55,10 @@ describe('id de nodo derivado', () => {
     // id cambiaba al re-exportar la MISMA llave. Se deriva del punto comprimido.
     it('NO cambia si la JWK trae los campos en otro orden o con extras', () => {
         const { publicJwk, nodeId } = makeNodeIdentity();
-        const reordenada = JSON.stringify({
+        const reordered = JSON.stringify({
             y: publicJwk.y, crv: 'P-256', x: publicJwk.x, kty: 'EC', ext: true, key_ops: ['verify']
         });
-        expect(deriveNodeId(reordenada)).toBe(nodeId);
+        expect(deriveNodeId(reordered)).toBe(nodeId);
     });
 
     it('la forma canónica son 33 bytes SEC1 comprimidos', () => {
@@ -160,10 +160,10 @@ describe('registro de peers', () => {
     // se verifica contra la llave, así que no se lo puede DECLARAR.
     it('rechaza un anuncio cuyo id NO se deriva de su llave', () => {
         const other = makeNodeIdentity();
-        const victima = makeNodeIdentity();
-        const body = { v: 1, nodeId: victima.nodeId, pubkey: other.pubkey, url: 'https://p2', ts: Date.now(), nonce: newNonce() };
-        const falso = { body, signature: signBody(other, body) };  // bien firmado, id ajeno
-        expect(PeerRegistry.parseAnnouncement(falso, 'https://p2')).toBeNull();
+        const victim = makeNodeIdentity();
+        const body = { v: 1, nodeId: victim.nodeId, pubkey: other.pubkey, url: 'https://p2', ts: Date.now(), nonce: newNonce() };
+        const fake = { body, signature: signBody(other, body) };  // bien firmado, id ajeno
+        expect(PeerRegistry.parseAnnouncement(fake, 'https://p2')).toBeNull();
     });
 
     it('rechaza un anuncio firmado por quien no es dueño de la pubkey', () => {
@@ -181,12 +181,12 @@ describe('registro de peers', () => {
 
     it('NO cambia la pubkey pineada de un URL por su cuenta', () => {
         const legit = makeNodeIdentity();
-        const rotada = makeNodeIdentity();
+        const rotated = makeNodeIdentity();
         registry.adopt({ url: 'https://p2', pubkey: legit.pubkey, nodeId: legit.nodeId });
-        const r = registry.adopt({ url: 'https://p2', pubkey: rotada.pubkey, nodeId: rotada.nodeId });
+        const r = registry.adopt({ url: 'https://p2', pubkey: rotated.pubkey, nodeId: rotated.nodeId });
         expect(r.status).toBe('conflict');
         expect(registry.byNodeId(legit.nodeId)).not.toBeNull();
-        expect(registry.byNodeId(rotada.nodeId)).toBeNull();
+        expect(registry.byNodeId(rotated.nodeId)).toBeNull();
     });
 
     it('rechaza el mismo nodo anunciado bajo dos URLs', () => {
@@ -275,7 +275,7 @@ describe('lectura de la identidad del vault', () => {
     let dir;
     beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-service-')); });
 
-    const registro = () => {
+    const peerRegistry2 = () => {
         const kp = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
         return {
             v: 1, ns: 'proxy', iss: 'test-master', enrolledAt: Date.now(),
@@ -286,20 +286,20 @@ describe('lectura de la identidad del vault', () => {
             }
         };
     };
-    const archivo = () => path.join(dir, 'service-identity.json');
+    const file = () => path.join(dir, 'service-identity.json');
 
     it('lee el archivo EN CLARO (enrolamientos anteriores al at-rest)', async () => {
-        const rec = registro();
-        fs.writeFileSync(archivo(), JSON.stringify(rec, null, 2));
+        const rec = peerRegistry2();
+        fs.writeFileSync(file(), JSON.stringify(rec, null, 2));
         const id = await loadNodeIdentity(dir);
         expect(id.pubkey).toBe(rec.device.publickey);
         expect(id.nodeId).toBe(deriveNodeId(rec.device.publickey));
     });
 
     it('lee el archivo CIFRADO at-rest (lo que escribe la lib al re-enrolar)', async () => {
-        const rec = registro();
+        const rec = peerRegistry2();
         const { atRestFor } = await atrest();
-        fs.writeFileSync(archivo(), atRestFor(dir).encrypt(JSON.stringify(rec, null, 2)), { mode: 0o600 });
+        fs.writeFileSync(file(), atRestFor(dir).encrypt(JSON.stringify(rec, null, 2)), { mode: 0o600 });
         const id = await loadNodeIdentity(dir);
         expect(id).not.toBeNull();
         expect(id.nodeId).toBe(deriveNodeId(rec.device.publickey));

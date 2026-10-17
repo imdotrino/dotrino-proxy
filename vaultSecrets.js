@@ -57,7 +57,7 @@ const NS = 'proxy';
  * timbre, así que valen en cuanto llegan. El aviso de reiniciar por ellas era falso, y
  * reiniciar el proxio por un cambio de llave cortaba todas las conexiones para nada.
  */
-const SE_REAPLICAN = /^TURN_|^PROXY_(PEERS|PUBLIC_URL)$|^FCM_|^APNS_/;
+const REAPPLIED_LIVE = /^TURN_|^PROXY_(PEERS|PUBLIC_URL)$|^FCM_|^APNS_/;
 
 const { fcmEnabled } = require('./fcm');
 const { apnsEnabled } = require('./apns');
@@ -102,9 +102,9 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
         }
         if (injected.some((k) => /^FCM_/.test(k))) log(`[push] FCM ${fcmEnabled() ? 'enabled' : 'still off (bad FCM_SERVICE_ACCOUNT_B64)'} from the vault`);
         if (injected.some((k) => /^APNS_/.test(k))) log(`[push] APNs ${apnsEnabled() ? 'enabled' : 'still off (incomplete APNS_*)'} from the vault`);
-        const tarde = injected.filter((k) => !SE_REAPLICAN.test(k));
-        if (tarde.length) {
-            log(`[vault] ⚠ these are only read at startup, so they are NOT active yet: ${tarde.join(', ')}`);
+        const late = injected.filter((k) => !REAPPLIED_LIVE.test(k));
+        if (late.length) {
+            log(`[vault] ⚠ these are only read at startup, so they are NOT active yet: ${late.join(', ')}`);
             log('[vault] ⚠ restart the proxy for them to take effect.');
         }
         onSecrets(secrets, { injected, overridden });
@@ -182,9 +182,9 @@ function handleVaultUpdate({ reason, ts, via }, { log = console.log, onPending, 
     // Con retraso corto a propósito — la salida de un proceso supervisado va por una
     // tubería y `process.exit()` en seco se come el log que explica por qué se murió,
     // que es lo único que va a mirar quien lo encuentre reiniciado.
-    const salir = exit || (() => process.exit(0));
-    setTimeout(salir, exitDelayMs).unref?.();
+    const exitFn = exit || (() => process.exit(0));
+    setTimeout(exitFn, exitDelayMs).unref?.();
     return 'restart';
 }
 
-module.exports = { startVaultSecrets, handleVaultUpdate, isEnrolled, serviceDir, NS, SE_REAPLICAN };
+module.exports = { startVaultSecrets, handleVaultUpdate, isEnrolled, serviceDir, NS, REAPPLIED_LIVE };

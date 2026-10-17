@@ -43,7 +43,7 @@ async function waitMeshReady(endpoints, ms = 30000) {
     for (;;) {
         const states = await Promise.all(endpoints.map(peersOf));
         if (states.every((s) => s && s.peers?.length && Object.values(s.mesh || {}).some((m) => m.ready))) return states;
-        if (Date.now() > deadline) throw new Error('la malla no se estableció: ' + JSON.stringify(states));
+        if (Date.now() > deadline) throw new Error('the mesh did not come up: ' + JSON.stringify(states));
         await sleep(300);
     }
 }
@@ -100,11 +100,11 @@ describe('la federación se configura desde la bóveda (sin .env)', () => {
     }, 60000);
 
     it('volver a aplicar lo mismo no reconecta nada (es idempotente)', async () => {
-        const antes = Object.values((await peersOf(httpA)).mesh)[0];
+        const before = Object.values((await peersOf(httpA)).mesh)[0];
         applyFederationConfig(() => {});
         await sleep(300);
-        const despues = Object.values((await peersOf(httpA)).mesh)[0];
+        const after = Object.values((await peersOf(httpA)).mesh)[0];
         // Un enlace nuevo empezaría de cero: mismas reconexiones = mismo enlace.
-        expect(despues.reconnects).toBe(antes.reconnects);
+        expect(after.reconnects).toBe(before.reconnects);
     });
 });

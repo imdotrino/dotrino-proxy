@@ -52,16 +52,16 @@ describe('canal cuyo dueño se quedó sin enlace', () => {
         // B se cae: A conserva el peer (lo tiene configurado) pero el enlace deja de estar listo.
         await b.stop();
 
-        const cliente = await connectTo(a.url);
+        const client = await connectTo(a.url);
         const sign = makeChannelSigner();
         const t0 = Date.now();
-        cliente.send({ type: 'publish', channel: sign(`${bNodeId}/content_prueba`), id: 'p1' });
-        const res = await cliente.waitFor((m) => (m.type === 'error' || m.type === 'published') && m.id === 'p1', 12000);
-        const tardo = Date.now() - t0;
+        client.send({ type: 'publish', channel: sign(`${bNodeId}/content_prueba`), id: 'p1' });
+        const res = await client.waitFor((m) => (m.type === 'error' || m.type === 'published') && m.id === 'p1', 12000);
+        const took = Date.now() - t0;
 
         expect(res.type).toBe('error');
         // El timeout del dueño son 6 s: si tardó eso, es que se creyó enviado.
-        expect(tardo).toBeLessThan(3000);
-        await cliente.close();
+        expect(took).toBeLessThan(3000);
+        await client.close();
     }, 40000);
 });

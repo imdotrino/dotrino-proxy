@@ -13,7 +13,7 @@ async function waitMeshReady(nodes, ms = 30000) {
         const allUp = states.every((s) => s && s.peers?.length &&
             Object.values(s.mesh || {}).some((m) => m.ready));
         if (allUp) return states;
-        if (Date.now() > deadline) throw new Error('la malla no se estableció: ' + JSON.stringify(states));
+        if (Date.now() > deadline) throw new Error('the mesh did not come up: ' + JSON.stringify(states));
         await sleep(300);
     }
 }
@@ -70,9 +70,9 @@ describe('malla s2s por WebSocket', () => {
         const n = 25;
         for (let i = 0; i < n; i++) cb.send({ to_publickey: alice.publickey, message: `orden-${i}` });
         await ca.waitFor((m) => m.type === 'message' && m.message === `orden-${n - 1}`, 10000);
-        const recibidos = ca.recv.filter((m) => m.type === 'message' && /^orden-\d+$/.test(m.message))
+        const received = ca.recv.filter((m) => m.type === 'message' && /^orden-\d+$/.test(m.message))
             .map((m) => Number(m.message.split('-')[1]));
-        expect(recibidos).toEqual(Array.from({ length: n }, (_, i) => i));
+        expect(received).toEqual(Array.from({ length: n }, (_, i) => i));
         await ca.close(); await cb.close();
     });
 
@@ -110,14 +110,14 @@ describe('malla s2s por WebSocket', () => {
         };
         const ws = new WebSocket(`ws://127.0.0.1:${a.port}/_s2s`);
         const closeCode = await new Promise((resolve, reject) => {
-            const t = setTimeout(() => reject(new Error('no cerró a tiempo')), 10000);
+            const t = setTimeout(() => reject(new Error('did not close in time')), 10000);
             ws.on('message', (raw) => {
                 const f = JSON.parse(raw.toString());
                 if (f.t === 'challenge') {
                     const body = { v: 1, op: 's2s-hello', from: intruder.pubkey, prefix: 'ZZ', nonce: f.nonce, ts: Date.now() };
                     ws.send(JSON.stringify({ t: 'hello', body, signature: signBody(intruder, body) }));
                 }
-                if (f.t === 'ready') { clearTimeout(t); reject(new Error('¡aceptó a un nodo desconocido!')); }
+                if (f.t === 'ready') { clearTimeout(t); reject(new Error('it accepted an unknown node!')); }
             });
             ws.on('close', (code) => { clearTimeout(t); resolve(code); });
             ws.on('error', () => {});
@@ -130,7 +130,7 @@ describe('malla s2s por WebSocket', () => {
         const WebSocket = require('ws');
         const ws = new WebSocket(`ws://127.0.0.1:${a.port}/_s2s`);
         const closeCode = await new Promise((resolve, reject) => {
-            const t = setTimeout(() => reject(new Error('no cerró a tiempo')), 10000);
+            const t = setTimeout(() => reject(new Error('did not close in time')), 10000);
             ws.on('message', (raw) => {
                 const f = JSON.parse(raw.toString());
                 if (f.t === 'challenge') {
@@ -177,17 +177,17 @@ describe('límite por peer en la malla', () => {
         // local y no se ejercita el límite). El burst de pair-redeem es 20: el
         // resto se descarta en el borde y cae en el timeout del canje.
         const AB = '123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-        const cuerpo = (i) => AB[i % 35] + AB[(i * 7) % 35] + AB[(i * 13) % 35] + AB[(i * 29) % 35];
-        const respuestas = [];
+        const payloadBody = (i) => AB[i % 35] + AB[(i * 7) % 35] + AB[(i * 13) % 35] + AB[(i * 29) % 35];
+        const replies = [];
         for (let i = 0; i < 60; i++) {
-            cb.send({ type: 'pair-redeem', code: a.hint + cuerpo(i), id: `sweep-${i}` });
+            cb.send({ type: 'pair-redeem', code: a.hint + payloadBody(i), id: `sweep-${i}` });
         }
         await sleep(2500);
-        for (const m of cb.recv) if (m.type === 'pair-redeem') respuestas.push(m);
+        for (const m of cb.recv) if (m.type === 'pair-redeem') replies.push(m);
         // Con el límite puesto, NO pueden contestarse las 60.
-        expect(respuestas.length).toBeLessThan(60);
+        expect(replies.length).toBeLessThan(60);
         // Y ninguna puede decir que acertó: los códigos son inventados.
-        expect(respuestas.every((r) => r.ok === false)).toBe(true);
+        expect(replies.every((r) => r.ok === false)).toBe(true);
         await cb.close();
     }, 30000);
 
@@ -196,8 +196,8 @@ describe('límite por peer en la malla', () => {
         const ca = await connectIdentified(a.url, alice);
         const cb = await connectTo(b.url);
         for (let i = 0; i < 30; i++) cb.send({ to_publickey: alice.publickey, message: `normal-${i}` });
-        const ultimo = await ca.waitFor((m) => m.type === 'message' && m.message === 'normal-29', 10000);
-        expect(ultimo.message).toBe('normal-29');
+        const last = await ca.waitFor((m) => m.type === 'message' && m.message === 'normal-29', 10000);
+        expect(last.message).toBe('normal-29');
         await ca.close(); await cb.close();
     }, 30000);
 });

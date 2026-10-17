@@ -13,14 +13,14 @@ describe('alfabeto sin confundibles', () => {
         // Sin excepciones: la invariante se comprueba tal como está escrita. Al
         // principio había un `O→O` identidad que obligaba a saltárselo, y una
         // invariante con excepción deja de ser una barandilla.
-        for (const origen of Object.keys(CONFUSABLES)) {
-            expect(ALPHABET.includes(origen)).toBe(false);
+        for (const source of Object.keys(CONFUSABLES)) {
+            expect(ALPHABET.includes(source)).toBe(false);
         }
     });
 
     it('todo destino del mapeo SÍ es emitible', () => {
-        for (const destino of Object.values(CONFUSABLES)) {
-            expect(ALPHABET.includes(destino)).toBe(true);
+        for (const target of Object.values(CONFUSABLES)) {
+            expect(ALPHABET.includes(target)).toBe(true);
         }
     });
 
@@ -89,16 +89,16 @@ describe('alfabeto sin confundibles', () => {
             const codes = new PairingCodes();
             // Se fuerza un cuerpo con dígitos confundibles para probar el camino.
             const { code } = codes.create({ instance: 'inst-1', hint: ALPHABET.slice(0, 2) });
-            const maldictado = [...code].map((c) => ({ 1: 'I', 5: 'S', 2: 'Z', 8: 'B', 6: 'G' }[c] || c)).join('');
-            expect(codes.redeem(maldictado).instance).toBe('inst-1');
+            const misdictated = [...code].map((c) => ({ 1: 'I', 5: 'S', 2: 'Z', 8: 'B', 6: 'G' }[c] || c)).join('');
+            expect(codes.redeem(misdictated).instance).toBe('inst-1');
         });
     });
 });
 
 describe('palabras desafortunadas', () => {
     it('solo lista lo que el alfabeto PUEDE producir', () => {
-        const { FEOS, ALPHABET: A } = require('../alphabet');
-        for (const w of FEOS) {
+        const { UGLY_WORDS, ALPHABET: A } = require('../alphabet');
+        for (const w of UGLY_WORDS) {
             for (const c of w) expect(A.includes(c)).toBe(true);
         }
     });

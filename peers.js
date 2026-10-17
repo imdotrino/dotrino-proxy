@@ -156,7 +156,7 @@ class PeerRegistry {
         const existing = this.byUrl.get(peer.url);
         if (existing) {
             if (existing.pubkey !== peer.pubkey) {
-                return { status: 'conflict', reason: `el peer ${peer.url} cambió de pubkey; se mantiene la pineada` };
+                return { status: 'conflict', reason: `peer ${peer.url} changed its pubkey; keeping the pinned one` };
             }
             try { this.persist.touchPeerNode(peer.url, Date.now()); } catch (_) {}
             return { status: 'known', peer: existing };
@@ -167,13 +167,13 @@ class PeerRegistry {
         // sabría a cuál hablarle.
         const sameId = this.byId.get(peer.nodeId);
         if (sameId && sameId.url !== peer.url) {
-            return { status: 'conflict', reason: `el nodo ${peer.nodeId} ya está pineado en ${sameId.url}; ${peer.url} anuncia la misma llave` };
+            return { status: 'conflict', reason: `node ${peer.nodeId} is already pinned at ${sameId.url}; ${peer.url} announces the same key` };
         }
         if (this.identity && peer.nodeId === this.identity.nodeId) {
-            return { status: 'conflict', reason: `el peer ${peer.url} anuncia MI propia llave` };
+            return { status: 'conflict', reason: `peer ${peer.url} announces MY own key` };
         }
         try { this.persist.pinPeerNode(peer.url, peer.pubkey, peer.nodeId, Date.now()); } catch (e) {
-            return { status: 'conflict', reason: `no se pudo pinear ${peer.url}: ${e.message}` };
+            return { status: 'conflict', reason: `could not pin ${peer.url}: ${e.message}` };
         }
         this._index(peer);
         return { status: 'pinned', peer };
@@ -191,9 +191,9 @@ class PeerRegistry {
         } finally { clearTimeout(t); }
         if (!res.ok) return { status: 'unreachable', reason: `HTTP ${res.status}` };
         let announcement;
-        try { announcement = await res.json(); } catch (e) { return { status: 'unreachable', reason: 'respuesta no JSON' }; }
+        try { announcement = await res.json(); } catch (e) { return { status: 'unreachable', reason: 'non-JSON response' }; }
         const peer = PeerRegistry.parseAnnouncement(announcement, url);
-        if (!peer) return { status: 'conflict', reason: `anuncio inválido o mal firmado de ${url}` };
+        if (!peer) return { status: 'conflict', reason: `invalid or badly signed announcement from ${url}` };
         return this.adopt(peer);
     }
 

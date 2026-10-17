@@ -88,12 +88,12 @@ function isEmittable(s) {
 // Solo se listan las que el alfabeto PUEDE producir: las que llevan L o S ya son
 // imposibles por construcción (CULO, ANAL, CULIAO…), así que ponerlas sería
 // dar la impresión de que el filtro hace más de lo que hace.
-const FEOS = ['PUTA', 'PUTO', 'TETA', 'PENE', 'CACA', 'PEDO', 'MOCO', 'MEAR', 'KKK'];
+const UGLY_WORDS = ['PUTA', 'PUTO', 'TETA', 'PENE', 'CACA', 'PEDO', 'MOCO', 'MEAR', 'KKK'];
 
 /** ¿El código sorteado contiene algo que da vergüenza dictar? */
 function isUnfortunate(code) {
     const up = String(code || '').toUpperCase();
-    return FEOS.some((w) => up.includes(w));
+    return UGLY_WORDS.some((w) => up.includes(w));
 }
 
-module.exports = { ALPHABET, CONFUSABLES, normalize, isEmittable, isUnfortunate, FEOS };
+module.exports = { ALPHABET, CONFUSABLES, normalize, isEmittable, isUnfortunate, UGLY_WORDS };

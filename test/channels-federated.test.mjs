@@ -47,7 +47,7 @@ describe('canales con nodo dueño', () => {
         for (;;) {
             const s = await Promise.all([a, b].map((n) => fetch(`${n.http}/peers`).then(r => r.json()).catch(() => null)));
             if (s.every((x) => x && x.peers?.length && Object.values(x.mesh || {}).some((m) => m.ready))) break;
-            if (Date.now() > deadline) throw new Error('la malla no se estableció');
+            if (Date.now() > deadline) throw new Error('the mesh did not come up');
             await sleep(300);
         }
     }, 60000);
@@ -64,74 +64,74 @@ describe('canales con nodo dueño', () => {
         ca.send({ type: 'publish', channel: sign('sala-local') });
         await ca.waitFor((m) => m.type === 'published');
         cb.send({ type: 'list', channel: sign('sala-local') });
-        const lista = await cb.waitFor((m) => m.type === 'channel_list');
-        expect(lista.tokens).toHaveLength(0);   // no se ven entre nodos
+        const list = await cb.waitFor((m) => m.type === 'channel_list');
+        expect(list.tokens).toHaveLength(0);   // no se ven entre nodos
         await ca.close(); await cb.close();
     }, 20000);
 
     it('dos personas en nodos distintos aparecen en la MISMA lista', async () => {
         const sign = makeChannelSigner();
-        const nombre = `${a.nodeId}/mesa-compartida`;
+        const chanName = `${a.nodeId}/mesa-compartida`;
         const ca = await connectTo(a.url);   // en el nodo dueño
         const cb = await connectTo(b.url);   // en el otro nodo
 
-        ca.send({ type: 'publish', channel: sign(nombre) });
+        ca.send({ type: 'publish', channel: sign(chanName) });
         await ca.waitFor((m) => m.type === 'published');
-        cb.send({ type: 'publish', channel: sign(nombre) });
+        cb.send({ type: 'publish', channel: sign(chanName) });
         await cb.waitFor((m) => m.type === 'published', 10000);
 
-        cb.send({ type: 'list', channel: sign(nombre) });
-        const lista = await cb.waitFor((m) => m.type === 'channel_list', 10000);
-        expect(lista.tokens).toContain(ca.token);
-        expect(lista.tokens).toContain(cb.token);
+        cb.send({ type: 'list', channel: sign(chanName) });
+        const list = await cb.waitFor((m) => m.type === 'channel_list', 10000);
+        expect(list.tokens).toContain(ca.token);
+        expect(list.tokens).toContain(cb.token);
         await ca.close(); await cb.close();
     }, 30000);
 
     it('el miembro que ya estaba se entera del que entra desde otro nodo', async () => {
         const sign = makeChannelSigner();
-        const nombre = `${a.nodeId}/mesa-avisos`;
+        const chanName = `${a.nodeId}/mesa-avisos`;
         const ca = await connectTo(a.url);
-        ca.send({ type: 'publish', channel: sign(nombre) });
+        ca.send({ type: 'publish', channel: sign(chanName) });
         await ca.waitFor((m) => m.type === 'published');
 
         const cb = await connectTo(b.url);
-        cb.send({ type: 'publish', channel: sign(nombre) });
+        cb.send({ type: 'publish', channel: sign(chanName) });
         await cb.waitFor((m) => m.type === 'published', 10000);
 
         const joined = await ca.waitFor((m) => m.type === 'joined' && m.token === cb.token, 10000);
-        expect(joined.channel).toBe(nombre);
+        expect(joined.channel).toBe(chanName);
         await ca.close(); await cb.close();
     }, 30000);
 
     it('el aviso de baja llega al miembro que está en OTRO nodo', async () => {
         const sign = makeChannelSigner();
-        const nombre = `${a.nodeId}/mesa-bajas`;
+        const chanName = `${a.nodeId}/mesa-bajas`;
         const ca = await connectTo(a.url);   // dueño
         const cb = await connectTo(b.url);   // remoto
-        ca.send({ type: 'publish', channel: sign(nombre) });
+        ca.send({ type: 'publish', channel: sign(chanName) });
         await ca.waitFor((m) => m.type === 'published');
-        cb.send({ type: 'publish', channel: sign(nombre) });
+        cb.send({ type: 'publish', channel: sign(chanName) });
         await cb.waitFor((m) => m.type === 'published', 10000);
         await ca.waitFor((m) => m.type === 'joined', 10000);
 
-        const se_va = ca.token;
+        const leaving = ca.token;
         await ca.close();
-        const aviso = await cb.waitFor((m) => m.type === 'disconnected' && m.token === se_va, 10000);
-        expect(aviso.channel).toBe(nombre);
+        const notice = await cb.waitFor((m) => m.type === 'disconnected' && m.token === leaving, 10000);
+        expect(notice.channel).toBe(chanName);
         await cb.close();
     }, 30000);
 
     it('contar un canal ajeno da el número del dueño, no cero', async () => {
         const sign = makeChannelSigner();
-        const nombre = `${a.nodeId}/mesa-cuenta`;
+        const chanName = `${a.nodeId}/mesa-cuenta`;
         const ca = await connectTo(a.url);
-        ca.send({ type: 'publish', channel: sign(nombre) });
+        ca.send({ type: 'publish', channel: sign(chanName) });
         await ca.waitFor((m) => m.type === 'published');
 
         const cb = await connectTo(b.url);
-        cb.send({ type: 'channel_count', channel: nombre });
-        const cuenta = await cb.waitFor((m) => m.type === 'channel_count', 10000);
-        expect(cuenta.count).toBe(1);
+        cb.send({ type: 'channel_count', channel: chanName });
+        const account = await cb.waitFor((m) => m.type === 'channel_count', 10000);
+        expect(account.count).toBe(1);
         await ca.close(); await cb.close();
     }, 30000);
 
@@ -168,7 +168,7 @@ describe('descubrimiento: una lista por nodo, mezcladas por el cliente', () => {
         for (;;) {
             const s = await Promise.all([a, b].map((n) => fetch(`${n.http}/peers`).then(r => r.json()).catch(() => null)));
             if (s.every((x) => x && x.peers?.length && Object.values(x.mesh || {}).some((m) => m.ready))) break;
-            if (Date.now() > deadline) throw new Error('la malla no se estableció');
+            if (Date.now() > deadline) throw new Error('the mesh did not come up');
             await sleep(300);
         }
     }, 60000);
@@ -191,46 +191,46 @@ describe('descubrimiento: una lista por nodo, mezcladas por el cliente', () => {
 
     it('un host de cada proxio, y el cliente los ve a los dos al mezclar', async () => {
         const sign = makeChannelSigner();
-        const canalA = `${a.nodeId}/cclobby/chess`;
-        const canalB = `${b.nodeId}/cclobby/chess`;
+        const channelA = `${a.nodeId}/cclobby/chess`;
+        const channelB = `${b.nodeId}/cclobby/chess`;
 
         // Cada host anuncia SOLO en el canal de su propio proxio.
         const hostA = await connectTo(a.url);
-        hostA.send({ type: 'publish', channel: sign(canalA) });
+        hostA.send({ type: 'publish', channel: sign(channelA) });
         await hostA.waitFor((m) => m.type === 'published');
 
         const hostB = await connectTo(b.url);
-        hostB.send({ type: 'publish', channel: sign(canalB) });
+        hostB.send({ type: 'publish', channel: sign(channelB) });
         await hostB.waitFor((m) => m.type === 'published');
 
         // Quien busca (conectado a B) pregunta en los DOS y mezcla.
-        const buscador = await connectTo(b.url);
-        buscador.send({ type: 'list', channel: sign(canalA), id: 'la' });
-        buscador.send({ type: 'list', channel: sign(canalB), id: 'lb' });
-        const la = await buscador.waitFor((m) => m.type === 'channel_list' && m.id === 'la', 10000);
-        const lb = await buscador.waitFor((m) => m.type === 'channel_list' && m.id === 'lb', 10000);
-        const mezcla = [...new Set([...la.tokens, ...lb.tokens])];
+        const seeker = await connectTo(b.url);
+        seeker.send({ type: 'list', channel: sign(channelA), id: 'la' });
+        seeker.send({ type: 'list', channel: sign(channelB), id: 'lb' });
+        const la_ = await seeker.waitFor((m) => m.type === 'channel_list' && m.id === 'la', 10000);
+        const lb = await seeker.waitFor((m) => m.type === 'channel_list' && m.id === 'lb', 10000);
+        const mix = [...new Set([...la_.tokens, ...lb.tokens])];
 
-        expect(mezcla).toContain(hostA.token);
-        expect(mezcla).toContain(hostB.token);
-        await hostA.close(); await hostB.close(); await buscador.close();
+        expect(mix).toContain(hostA.token);
+        expect(mix).toContain(hostB.token);
+        await hostA.close(); await hostB.close(); await seeker.close();
     }, 30000);
 
     it('si un nodo no contesta, se siguen viendo las salas de los demás', async () => {
         const sign = makeChannelSigner();
-        const canalB = `${b.nodeId}/cclobby/chess`;
+        const channelB = `${b.nodeId}/cclobby/chess`;
         const hostB = await connectTo(b.url);
-        hostB.send({ type: 'publish', channel: sign(canalB) });
+        hostB.send({ type: 'publish', channel: sign(channelB) });
         await hostB.waitFor((m) => m.type === 'published');
 
-        const buscador = await connectTo(b.url);
+        const seeker = await connectTo(b.url);
         // Un nodo que no existe: su consulta falla, pero no arrastra a la otra.
-        buscador.send({ type: 'list', channel: sign('YYYYYYYYYYYY/cclobby/chess'), id: 'muerto' });
-        buscador.send({ type: 'list', channel: sign(canalB), id: 'vivo' });
-        const muerto = await buscador.waitFor((m) => (m.type === 'error' || m.type === 'channel_list') && m.id === 'muerto', 10000);
-        const vivo = await buscador.waitFor((m) => m.type === 'channel_list' && m.id === 'vivo', 10000);
-        expect(muerto.type).toBe('error');
-        expect(vivo.tokens).toContain(hostB.token);
-        await hostB.close(); await buscador.close();
+        seeker.send({ type: 'list', channel: sign('YYYYYYYYYYYY/cclobby/chess'), id: 'muerto' });
+        seeker.send({ type: 'list', channel: sign(channelB), id: 'vivo' });
+        const dead = await seeker.waitFor((m) => (m.type === 'error' || m.type === 'channel_list') && m.id === 'muerto', 10000);
+        const alive = await seeker.waitFor((m) => m.type === 'channel_list' && m.id === 'vivo', 10000);
+        expect(dead.type).toBe('error');
+        expect(alive.tokens).toContain(hostB.token);
+        await hostB.close(); await seeker.close();
     }, 30000);
 });

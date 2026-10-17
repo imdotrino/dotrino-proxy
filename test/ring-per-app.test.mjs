@@ -56,31 +56,31 @@ describe('timbre y cola por app', () => {
     });
 
     it('dos apps con la misma llave: cada una recibe SOLO su timbre, y la última no pisa a la otra', async () => {
-        const tel = makeUser();
-        const c = await connectIdentified(node.url, tel);
-        await subscribe(c, tel, 'vault');
-        await subscribe(c, tel, 'messenger');
+        const phone = makeUser();
+        const c = await connectIdentified(node.url, phone);
+        await subscribe(c, phone, 'vault');
+        await subscribe(c, phone, 'messenger');
         await c.close();
 
-        const emisor = await connectTo(node.url);
+        const sender = await connectTo(node.url);
         let i = hits.length;
-        emisor.send({ to_publickey: tel.publickey, message: 'pedido', app: 'vault', id: 'a1' });
-        await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'a1');
+        sender.send({ to_publickey: phone.publickey, message: 'pedido', app: 'vault', id: 'a1' });
+        await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'a1');
         expect(await rungSince(i)).toEqual(['vault']);
 
         i = hits.length;
-        emisor.send({ to_publickey: tel.publickey, message: 'hola', app: 'messenger', id: 'a2' });
-        await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'a2');
+        sender.send({ to_publickey: phone.publickey, message: 'hola', app: 'messenger', id: 'a2' });
+        await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'a2');
         expect(await rungSince(i)).toEqual(['messenger']);
 
         // Sin app (un emisor que aún no lo dice): a todas, como antes.
         i = hits.length;
-        emisor.send({ to_publickey: tel.publickey, message: 'sin-app', id: 'a3' });
-        await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'a3');
+        sender.send({ to_publickey: phone.publickey, message: 'sin-app', id: 'a3' });
+        await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'a3');
         expect(await rungSince(i)).toEqual(['messenger', 'vault']);
 
         // Cada app baja lo suyo (y lo que no dijo a quién iba); lo de la otra se queda.
-        const msgr = await connectIdentified(node.url, tel, { app: 'messenger' });
+        const msgr = await connectIdentified(node.url, phone, { app: 'messenger' });
         const got = [];
         for (let k = 0; k < 2; k++) got.push((await msgr.waitFor((m) => m.type === 'message' && !got.includes(m.message))).message);
         expect(got.sort()).toEqual(['hola', 'sin-app']);
@@ -88,55 +88,55 @@ describe('timbre y cola por app', () => {
 
         // Con messenger CONECTADO, lo de la bóveda no se le entrega a messenger: se encola y timbra a la bóveda.
         i = hits.length;
-        emisor.send({ to_publickey: tel.publickey, message: 'pedido-2', app: 'vault', id: 'a4' });
-        const r4 = await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'a4');
-        expect(r4.queued).toContain(tel.publickey);
+        sender.send({ to_publickey: phone.publickey, message: 'pedido-2', app: 'vault', id: 'a4' });
+        const r4 = await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'a4');
+        expect(r4.queued).toContain(phone.publickey);
         expect(await rungSince(i)).toEqual(['vault']);
 
-        const vault = await connectIdentified(node.url, tel, { app: 'vault' });
+        const vault = await connectIdentified(node.url, phone, { app: 'vault' });
         const got2 = [];
         for (let k = 0; k < 2; k++) got2.push((await vault.waitFor((m) => m.type === 'message' && !got2.includes(m.message))).message);
         expect(got2.sort()).toEqual(['pedido', 'pedido-2']);
-        await msgr.close(); await vault.close(); await emisor.close();
+        await msgr.close(); await vault.close(); await sender.close();
     }, 30000);
 
     it('una suscripción que no dice su app (cliente viejo) recibe todos los timbres', async () => {
-        const tel = makeUser();
-        const c = await connectIdentified(node.url, tel);
-        await subscribe(c, tel, null, 'vieja');
+        const phone = makeUser();
+        const c = await connectIdentified(node.url, phone);
+        await subscribe(c, phone, null, 'vieja');
         await c.close();
-        const emisor = await connectTo(node.url);
+        const sender = await connectTo(node.url);
         const i = hits.length;
-        emisor.send({ to_publickey: tel.publickey, message: 'x', app: 'messenger', id: 'b1' });
-        await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'b1');
+        sender.send({ to_publickey: phone.publickey, message: 'x', app: 'messenger', id: 'b1' });
+        await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'b1');
         expect(await rungSince(i)).toEqual(['vieja']);
-        await emisor.close();
+        await sender.close();
     }, 30000);
 
     it('una app que antes no decía cuál era y ahora sí: su fila vieja se va (si no, seguiría sonando con todo)', async () => {
-        const tel = makeUser();
-        const c = await connectIdentified(node.url, tel);
+        const phone = makeUser();
+        const c = await connectIdentified(node.url, phone);
         const sub = webSub('msgr-token');
         const reg = async (app) => {
-            const data = { op: 'push-subscribe', publickey: tel.publickey, ts: Date.now(), subscription: JSON.stringify(sub), ...(app ? { app } : {}) };
-            c.send({ type: 'push-subscribe', data, signature: tel.sign(data) });
+            const data = { op: 'push-subscribe', publickey: phone.publickey, ts: Date.now(), subscription: JSON.stringify(sub), ...(app ? { app } : {}) };
+            c.send({ type: 'push-subscribe', data, signature: phone.sign(data) });
             await c.waitFor((m) => m.type === 'push-subscribed' && (m.app || null) === (app || null));
         };
         await reg(null);          // messenger viejo: sin app
         await reg('messenger');   // messenger nuevo: el MISMO token, ahora con app
-        await subscribe(c, tel, 'vault');
+        await subscribe(c, phone, 'vault');
         await c.close();
-        const emisor = await connectTo(node.url);
+        const sender = await connectTo(node.url);
         const i = hits.length;
-        emisor.send({ to_publickey: tel.publickey, message: 'pedido', app: 'vault', id: 'r1' });
-        await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'r1');
+        sender.send({ to_publickey: phone.publickey, message: 'pedido', app: 'vault', id: 'r1' });
+        await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'r1');
         expect(await rungSince(i)).toEqual(['vault']);
-        await emisor.close();
+        await sender.close();
     }, 30000);
 
     it('push-prune: el receptor dice qué llaves le quedan y deja de sonar con las demás', async () => {
         // El teléfono quitó una cuenta: ya no tiene su llave, así que no puede firmar la baja.
-        const queda = makeUser(); const borrada = makeUser(); const ajena = makeUser(); const deOtraApp = makeUser();
+        const remains = makeUser(); const deleted = makeUser(); const foreign = makeUser(); const fromOtherApp = makeUser();
         const c = await connectTo(node.url);
         const sub = webSub('telefono');
         const reg = async (user, app, s = sub) => {
@@ -144,25 +144,25 @@ describe('timbre y cola por app', () => {
             c.send({ type: 'push-subscribe', data, signature: user.sign(data) });
             expect((await c.waitFor((m) => (m.type === 'push-subscribed' && m.publickey === user.publickey && m.app === app) || m.type === 'error')).type).toBe('push-subscribed');
         };
-        await reg(queda, 'vault'); await reg(borrada, 'vault'); await reg(deOtraApp, 'messenger');
-        await reg(ajena, 'vault', webSub('otro-telefono'));
+        await reg(remains, 'vault'); await reg(deleted, 'vault'); await reg(fromOtherApp, 'messenger');
+        await reg(foreign, 'vault', webSub('otro-telefono'));
         const rings = async (user, app, id) => {
             const i = hits.length;
             c.send({ to_publickey: user.publickey, message: id, app, id });
             await c.waitFor((m) => m.type === 'message_sent' && m.id === id);
             return rungSince(i);
         };
-        expect(await rings(borrada, 'vault', 'p0')).toEqual(['telefono']);
+        expect(await rings(deleted, 'vault', 'p0')).toEqual(['telefono']);
 
-        c.send({ type: 'push-prune', target: sub.endpoint, app: 'vault', keep: [queda.publickey], id: 'pr' });
+        c.send({ type: 'push-prune', target: sub.endpoint, app: 'vault', keep: [remains.publickey], id: 'pr' });
         const r = await c.waitFor((m) => m.id === 'pr');
         expect(r.type).toBe('push-pruned');
         expect(r.removed).toBe(1);
 
-        expect(await rings(borrada, 'vault', 'p1')).toEqual([]);                 // la borrada ya no suena
-        expect(await rings(queda, 'vault', 'p2')).toEqual(['telefono']);         // la que queda, sí
-        expect(await rings(deOtraApp, 'messenger', 'p3')).toEqual(['telefono']); // otra app: no se toca
-        expect(await rings(ajena, 'vault', 'p4')).toEqual(['otro-telefono']);    // otro receptor: tampoco
+        expect(await rings(deleted, 'vault', 'p1')).toEqual([]);                 // la borrada ya no suena
+        expect(await rings(remains, 'vault', 'p2')).toEqual(['telefono']);         // la que queda, sí
+        expect(await rings(fromOtherApp, 'messenger', 'p3')).toEqual(['telefono']); // otra app: no se toca
+        expect(await rings(foreign, 'vault', 'p4')).toEqual(['otro-telefono']);    // otro receptor: tampoco
 
         // Mal formado: se dice, no se quita nada.
         c.send({ type: 'push-prune', target: sub.endpoint, id: 'bad' });
@@ -172,7 +172,7 @@ describe('timbre y cola por app', () => {
 
     it('una base con el esquema VIEJO se migra: la suscripción sigue y la cola también', async () => {
         // Es lo que pasa en proxy1/proxy2 al desplegar: la base existe, sin columna `app`.
-        const tel = makeUser();
+        const phone = makeUser();
         const oldDir = makeNodeDir('timbre-migra');
         const db = new DatabaseSync(path.join(oldDir, 'proxy.db'));
         db.exec(`
@@ -180,24 +180,24 @@ describe('timbre y cola por app', () => {
             CREATE TABLE offline_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, pubkey TEXT NOT NULL, from_token TEXT, from_pubkey TEXT,
                 message TEXT NOT NULL, queued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, bytes INTEGER NOT NULL);
         `);
-        db.prepare('INSERT INTO push_subscriptions VALUES (?, ?, ?)').run(tel.publickey, JSON.stringify(webSub('migrada')), Date.now());
+        db.prepare('INSERT INTO push_subscriptions VALUES (?, ?, ?)').run(phone.publickey, JSON.stringify(webSub('migrada')), Date.now());
         db.prepare('INSERT INTO offline_queue (pubkey, message, queued_at, expires_at, bytes) VALUES (?, ?, ?, ?, ?)')
-            .run(tel.publickey, JSON.stringify('de-antes'), Date.now(), Date.now() + 3600e3, 10);
+            .run(phone.publickey, JSON.stringify('de-antes'), Date.now(), Date.now() + 3600e3, 10);
         db.close();
-        const viejo = await startNode({ name: 'MIGRA', dir: oldDir, port: await freePort(), env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' } });
+        const old = await startNode({ name: 'MIGRA', dir: oldDir, port: await freePort(), env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' } });
         try {
-            const emisor = await connectTo(viejo.url);
+            const sender = await connectTo(old.url);
             const i = hits.length;
-            emisor.send({ to_publickey: tel.publickey, message: 'nuevo', app: 'vault', id: 'm1' });
-            await emisor.waitFor((m) => m.type === 'message_sent' && m.id === 'm1');
+            sender.send({ to_publickey: phone.publickey, message: 'nuevo', app: 'vault', id: 'm1' });
+            await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'm1');
             expect(await rungSince(i)).toEqual(['migrada']);
-            const c = await connectIdentified(viejo.url, tel, { app: 'vault' });
+            const c = await connectIdentified(old.url, phone, { app: 'vault' });
             const got = [];
             for (let k = 0; k < 2; k++) got.push((await c.waitFor((m) => m.type === 'message' && !got.includes(m.message))).message);
             expect(got.sort()).toEqual(['de-antes', 'nuevo']);
-            await c.close(); await emisor.close();
+            await c.close(); await sender.close();
         } finally {
-            await viejo.stop();
+            await old.stop();
             try { fs.rmSync(oldDir, { recursive: true, force: true }); } catch (_) {}
         }
     }, 30000);

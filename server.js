@@ -80,7 +80,7 @@ const IDENTIFY_TS_TOLERANCE_MS = 5 * 60 * 1000;       // ±5 min
  */
 const PROXY_AUDIENCE = String(process.env.PROXY_AUDIENCE || '').trim().replace(/\/+$/, '') || null;
 const PROXY_AUDIENCE_ENFORCE = process.env.PROXY_AUDIENCE_ENFORCE === '1';
-const identifySinAudiencia = new Map();   // pubkey → cuántas veces (para saber a quién le falta)
+const identifyWithoutAudience = new Map();   // pubkey → cuántas veces (para saber a quién le falta)
 
 // --- Federación s2s (opcional): reenviar mensajes por pubkey a proxies peer. ---
 // Apagada si PROXY_PEERS está vacío → el proxy se comporta EXACTAMENTE como antes.
@@ -211,11 +211,11 @@ const mesh = new Mesh({
             const { rid } = payload || {};
             const pending = pendingRedeems.get(rid);
             if (!pending) return;   // ya se resolvió o venció el timeout
-            pending.recibidas++;
+            pending.received++;
             if (payload.ok && payload.instance) {
-                pending.respuestas.push({ instance: payload.instance, pubkey: payload.publickey || null });
+                pending.replies.push({ instance: payload.instance, pubkey: payload.publickey || null });
             }
-            if (pending.recibidas >= pending.esperadas) pending.resolver();
+            if (pending.received >= pending.expected) pending.resolve();
         } catch (e) { console.warn('[mesh] pair-result failed:', e.message); }
     }
 });
@@ -594,20 +594,20 @@ function verifyEncPubStatement(data, signature) {
  */
 function storeEncPub(data, signature) {
     if (!verifyEncPubStatement(data, signature)) return false;
-    const previo = encPubs.get(data.publickey);
+    const prev = encPubs.get(data.publickey);
     // NUNCA HACIA ATRÁS: sin esto, reenviar un anuncio viejo devolvería a alguien a una
     // llave que ya no usa, y sus mensajes se volverían ilegibles sin que nadie tocara nada.
-    if (previo && previo.ts >= data.ts) return false;
+    if (prev && prev.ts >= data.ts) return false;
     encPubs.set(data.publickey, { data, signature, ts: data.ts });
     try { persist.upsertEncPub(data.publickey, JSON.stringify(data), signature, data.ts, Date.now()); }
     catch (e) { console.warn('[encpub] could not persist announcement:', e.message); }
     return true;
 }
 
-for (const fila of persist.loadEncPubs(Date.now() - ENCPUB_TTL_MS)) {
+for (const row of persist.loadEncPubs(Date.now() - ENCPUB_TTL_MS)) {
     try {
-        const data = JSON.parse(fila.data);
-        encPubs.set(fila.pubkey, { data, signature: fila.signature, ts: fila.ts });
+        const data = JSON.parse(row.data);
+        encPubs.set(row.pubkey, { data, signature: row.signature, ts: row.ts });
     } catch (_) { /* fila ilegible: se regenera con el próximo anuncio */ }
 }
 
@@ -981,7 +981,7 @@ function verifyDeviceCert(cert, deviceJwkStr) {
  * que `canSeal`/`sealersOf` de @dotrino/identity, escrita aquí porque el proxio no importa
  * el pilar — si alguna vez divergen, manda el pilar.
  */
-function puedeSellar(acta, pub) {
+function canSeal(acta, pub) {
     if (acta.v <= 2 && acta.sealer === pub) return true;
     const m = (acta.members || []).find(x => x && x.pub === pub);
     if (!m || !Array.isArray(m.caps) || !m.caps.includes('sealer')) return false;
@@ -1038,7 +1038,7 @@ function verifyActaMembership(acta, deviceJwkStr) {
     if (sealedBy !== profileId) return null;
     // Y además el acta tiene que decir que esa llave puede sellar (permiso menos renuncias):
     // si el dueño se lo quitó, no vale ni siendo la del perfil.
-    if (!puedeSellar(acta, sealedBy)) return null;
+    if (!canSeal(acta, sealedBy)) return null;
     let sealerJwk; try { sealerJwk = JSON.parse(sealedBy); } catch { return null; }
     // El cuerpo firmado es el acta SIN `sig` y SIN `card` — tiene que coincidir exactamente
     // con `actaBody()` de @dotrino/identity/acta, que es quien la firma. La tarjeta va aparte
@@ -1872,11 +1872,11 @@ function validateSignatureBasic(channelData) {
 function verifyPeerEnvelope(envelope) {
     const body = envelope && envelope.body;
     const signature = envelope && envelope.signature;
-    if (!body || !signature || body.v !== 1) return { ok: false, reason: 'sobre s2s malformado' };
+    if (!body || !signature || body.v !== 1) return { ok: false, code: 'bad-envelope', reason: 'malformed s2s envelope' };
     const peer = peerRegistry.byNodePubkey(body.from);
-    if (!peer) return { ok: false, reason: 'nodo emisor desconocido (no pineado)' };
-    if (!nodeIdentityLib.verifyBody(body, signature, peer.pubkey)) return { ok: false, reason: 'firma s2s inválida' };
-    if (!s2sReplay.accept(body.nonce, body.ts)) return { ok: false, reason: 'trama s2s repetida o fuera de ventana' };
+    if (!peer) return { ok: false, code: 'unknown-peer', reason: 'unknown sender node (not pinned)' };
+    if (!nodeIdentityLib.verifyBody(body, signature, peer.pubkey)) return { ok: false, code: 'bad-signature', reason: 'invalid s2s signature' };
+    if (!s2sReplay.accept(body.nonce, body.ts)) return { ok: false, code: 'replayed', reason: 's2s frame replayed or outside the window' };
     return { ok: true, body, peer };
 }
 
@@ -1905,8 +1905,8 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             audience: PROXY_AUDIENCE,
             enforcing: PROXY_AUDIENCE_ENFORCE,
-            clientesSinAudiencia: identifySinAudiencia.size,
-            identifiesSinAudiencia: [...identifySinAudiencia.values()].reduce((a, b) => a + b, 0)
+            clientesSinAudiencia: identifyWithoutAudience.size,
+            identifiesSinAudiencia: [...identifyWithoutAudience.values()].reduce((a, b) => a + b, 0)
         }));
         return;
     }
@@ -1954,7 +1954,7 @@ const server = http.createServer((req, res) => {
                 // secreto simétrico compartido, que no distinguía QUÉ nodo hablaba.
                 const check = verifyPeerEnvelope(envelope);
                 if (!check.ok) { res.writeHead(401, { 'content-type': 'application/json' });
-                    res.end(JSON.stringify({ error: check.reason })); return; }
+                    res.end(JSON.stringify({ code: check.code, error: check.reason })); return; }
                 const { toPubkey, fromPubkey, message, queuedAt, expiresAt, ephemeral, quiet, app } = check.body;
                 if (typeof toPubkey !== 'string' || message === undefined) { res.writeHead(400); res.end(); return; }
                 const r = await deliverFederated(toPubkey, wireBody.fromJson(message), fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app));
@@ -2313,7 +2313,8 @@ wss.on('connection', (ws, req) => {
             if (targetTokens.length === 0) {
                 const errorResponse = {
                     type: 'error',
-                    error: 'El campo "to" debe contener al menos un token destino'
+                    code: 'no-targets',
+                    error: 'the "to" field must contain at least one target token'
                 };
                 
                 // Incluir ID del mensaje original si existe
@@ -2695,7 +2696,8 @@ wss.on('connection', (ws, req) => {
         if (targetToken === token) {
             const errorResponse = {
                 type: 'error',
-                error: 'No puedes desconectarte de ti mismo'
+                code: 'self-disconnect',
+                error: 'you cannot disconnect from yourself'
             };
             
             // Incluir ID del mensaje original si existe
@@ -2768,14 +2770,14 @@ wss.on('connection', (ws, req) => {
         try {
             const data = message.data;
             const sig = message.signature;
-            const mia = tokenToPubkey.get(ws.token);
-            if (!mia) {
+            const ownPubkey = tokenToPubkey.get(ws.token);
+            if (!ownPubkey) {
                 const e = { type: 'error', error: 'encpub: identificate primero (identify)' };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
                 return;
             }
-            if (!data || data.publickey !== mia) {
+            if (!data || data.publickey !== ownPubkey) {
                 const e = { type: 'error', code: 'encpub-not-yours', error: 'encpub: the announcement does not belong to the identity of this connection' };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
@@ -2787,14 +2789,14 @@ wss.on('connection', (ws, req) => {
                 ws.send(JSON.stringify(e));
                 return;
             }
-            const guardado = storeEncPub(data, sig);
+            const stored = storeEncPub(data, sig);
             // Se reparte SOLO lo que cambió: reenviar lo repetido haría que dos nodos se
             // devolvieran el mismo anuncio para siempre.
-            if (guardado) {
+            if (stored) {
                 try { mesh.broadcastEncPub({ data, signature: sig }); }
                 catch (e) { console.warn('[encpub] mesh broadcast failed:', e.message); }
             }
-            const response = { type: 'encpub-announced', publickey: data.publickey, stored: guardado };
+            const response = { type: 'encpub-announced', publickey: data.publickey, stored: stored };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
         } catch (e) {
@@ -2815,26 +2817,26 @@ wss.on('connection', (ws, req) => {
      */
     function handleEncLookupMessage(ws, message) {
         try {
-            const pedidas = Array.isArray(message.publickeys)
+            const requested = Array.isArray(message.publickeys)
                 ? message.publickeys
                 : (typeof message.publickeys === 'string' ? [message.publickeys] : null);
-            if (!pedidas || pedidas.length === 0) {
-                const e = { type: 'error', error: 'enc-lookup: falta publickeys' };
+            if (!requested || requested.length === 0) {
+                const e = { type: 'error', code: 'bad-input', error: 'enc-lookup: missing publickeys' };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
                 return;
             }
-            if (pedidas.length > MAX_ENCPUB_LOOKUP) {
-                const e = { type: 'error', code: 'too-many-keys', error: `enc-lookup: too many keys (${pedidas.length}); the maximum is ${MAX_ENCPUB_LOOKUP}` };
+            if (requested.length > MAX_ENCPUB_LOOKUP) {
+                const e = { type: 'error', code: 'too-many-keys', error: `enc-lookup: too many keys (${requested.length}); the maximum is ${MAX_ENCPUB_LOOKUP}` };
                 applyMessageIds(e, message);
                 ws.send(JSON.stringify(e));
                 return;
             }
             const keys = [];
             const missing = [];
-            for (const pk of pedidas) {
-                const entrada = typeof pk === 'string' ? encPubs.get(pk) : null;
-                if (entrada) keys.push({ data: entrada.data, signature: entrada.signature });
+            for (const pk of requested) {
+                const entry = typeof pk === 'string' ? encPubs.get(pk) : null;
+                if (entry) keys.push({ data: entry.data, signature: entry.signature });
                 else missing.push(pk);
             }
             const response = { type: 'enc-lookup', keys, missing, timestamp: new Date().toISOString() };
@@ -2887,8 +2889,8 @@ wss.on('connection', (ws, req) => {
                     ws.send(JSON.stringify(errorResponse));
                     return;
                 }
-                const n = (identifySinAudiencia.get(data.publickey) || 0) + 1;
-                identifySinAudiencia.set(data.publickey, n);
+                const n = (identifyWithoutAudience.get(data.publickey) || 0) + 1;
+                identifyWithoutAudience.set(data.publickey, n);
                 // Una línea por llave, no una por identify: reconectar es normal y no hace
                 // falta repetirlo. Lo que se quiere saber es QUIÉN falta por actualizar.
                 if (n === 1) {
@@ -2898,7 +2900,7 @@ wss.on('connection', (ws, req) => {
             let pubKeyJwk;
             try { pubKeyJwk = JSON.parse(data.publickey); }
             catch (_) {
-                const errorResponse = { type: 'error', error: 'identify.publickey debe ser JWK serializado' };
+                const errorResponse = { type: 'error', code: 'bad-publickey', error: 'identify.publickey must be a serialized JWK' };
                 applyMessageIds(errorResponse, message);
                 ws.send(JSON.stringify(errorResponse));
                 return;
@@ -3000,7 +3002,7 @@ wss.on('connection', (ws, req) => {
             let pubKeyJwk;
             try { pubKeyJwk = JSON.parse(data.publickey); }
             catch (_) {
-                const e = { type: 'error', error: 'push-subscribe.publickey debe ser JWK serializado' };
+                const e = { type: 'error', code: 'bad-publickey', error: 'push-subscribe.publickey must be a serialized JWK' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
@@ -3104,7 +3106,7 @@ wss.on('connection', (ws, req) => {
             let pubKeyJwk;
             try { pubKeyJwk = JSON.parse(data.publickey); }
             catch (_) {
-                const e = { type: 'error', error: 'push-unsubscribe.publickey debe ser JWK serializado' };
+                const e = { type: 'error', code: 'bad-publickey', error: 'push-unsubscribe.publickey must be a serialized JWK' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
@@ -3138,7 +3140,7 @@ wss.on('connection', (ws, req) => {
         let jwk;
         try { jwk = JSON.parse(data.publickey); }
         catch (_) {
-            const e = { type: 'error', error: `${op}.publickey debe ser JWK serializado` };
+            const e = { type: 'error', code: 'bad-publickey', error: `${op}.publickey must be a serialized JWK` };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
         }
         if (!verifySignatureWithJWK(data, sig, jwk)) {
@@ -3160,7 +3162,7 @@ wss.on('connection', (ws, req) => {
             if (!data) return;
             const boundPubkey = tokenToPubkey.get(ws.token);
             if (boundPubkey !== data.publickey) {
-                const e = { type: 'error', error: 'turn-credentials requiere identify previo con esa pubkey' };
+                const e = { type: 'error', code: 'not-identified', error: 'turn-credentials requires a prior identify with that pubkey' };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
             if (!turnIssuer.enabled) {
@@ -3174,7 +3176,7 @@ wss.on('connection', (ws, req) => {
                 const why = {
                     'turn-daily-cap': 'turn-credentials: daily traffic cap reached',
                     'turn-usage-unknown': 'turn-credentials: usage cannot be read, not issuing',
-                    'turn-quota': 'turn-credentials: cuota por hora alcanzada'
+                    'turn-quota': 'turn-credentials: hourly quota reached'
                 };
                 // 429: «ahora no». El cliente sigue por el proxio y vuelve a pedir pasado
                 // `retry_after_ms` (proxy-client ≥ 0.32.0).
@@ -3230,7 +3232,7 @@ wss.on('connection', (ws, req) => {
             } else {
                 nextFire = Number(spec.fireAt);
                 if (!Number.isFinite(nextFire) || nextFire <= Date.now()) {
-                    const e = { type: 'error', error: 'fireAt debe ser un timestamp futuro (ms)' };
+                    const e = { type: 'error', code: 'bad-fireat', error: 'fireAt must be a future timestamp (ms)' };
                     applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
                 }
             }
@@ -3331,11 +3333,11 @@ wss.on('connection', (ws, req) => {
         }
         const hint = code.slice(0, nodeIdentityLib.CODE_HINT_LEN);
 
-        const remotos = nodeIdentity ? peerRegistry.candidatesByHint(hint) : [];
-        const soyCandidato = !nodeIdentity || hint === nodeIdentity.hint;
+        const remotes = nodeIdentity ? peerRegistry.candidatesByHint(hint) : [];
+        const isCandidate = !nodeIdentity || hint === nodeIdentity.hint;
 
         // Caso común y barato: solo yo puedo tenerlo.
-        if (soyCandidato && remotos.length === 0) {
+        if (isCandidate && remotes.length === 0) {
             const r = pairingCodes.redeem(code);
             const response = r.error
                 ? { type: 'pair-redeem', ok: false, code: r.code, error: r.error }
@@ -3344,52 +3346,52 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify(response));
             return;
         }
-        if (!soyCandidato && remotos.length === 0) {
+        if (!isCandidate && remotes.length === 0) {
             const e = { type: 'pair-redeem', ok: false, code: 'unknown-code-node', error: 'no known node can hold that code' };
             applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
         }
 
         // Hay varios candidatos (o uno remoto): se pregunta a todos y se espera.
         const rid = `r${++redeemSeq}`;
-        const local = soyCandidato ? pairingCodes.redeem(code) : null;
+        const local = isCandidate ? pairingCodes.redeem(code) : null;
         const pending = {
             ws, message,
-            esperadas: remotos.length,
-            respuestas: local && !local.error ? [{ instance: local.instance, pubkey: local.pubkey }] : [],
-            recibidas: 0,
+            expected: remotes.length,
+            replies: local && !local.error ? [{ instance: local.instance, pubkey: local.pubkey }] : [],
+            received: 0,
             timer: null
         };
-        const resolver = () => {
+        const resolve = () => {
             if (!pendingRedeems.has(rid)) return;
             pendingRedeems.delete(rid);
             clearTimeout(pending.timer);
             let response;
-            if (pending.respuestas.length === 1) {
-                const r = pending.respuestas[0];
+            if (pending.replies.length === 1) {
+                const r = pending.replies[0];
                 response = { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
-            } else if (pending.respuestas.length > 1) {
+            } else if (pending.replies.length > 1) {
                 // Colisión real o un nodo mintiendo. En los dos casos la respuesta
                 // correcta es la misma: no adivinar.
                 response = { type: 'pair-redeem', ok: false, code: 'ambiguous-code', error: 'ambiguous code: ask for a new one' };
-                console.warn(`[pair] ambiguous code (${pending.respuestas.length} nodes claim it) — filter ${hint}`);
+                console.warn(`[pair] ambiguous code (${pending.replies.length} nodes claim it) — filter ${hint}`);
             } else {
                 response = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid or already used code' };
             }
             applyMessageIds(response, pending.message);
             try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
         };
-        pending.resolver = resolver;
-        pending.timer = setTimeout(resolver, 6000);
+        pending.resolve = resolve;
+        pending.timer = setTimeout(resolve, 6000);
         if (pending.timer.unref) pending.timer.unref();
         pendingRedeems.set(rid, pending);
 
-        let enviadas = 0;
-        for (const peer of remotos) {
-            if (mesh.sendTo(peer.pubkey, 'pair-redeem', { rid, code }, { retain: false })) enviadas++;
+        let sentCount = 0;
+        for (const peer of remotes) {
+            if (mesh.sendTo(peer.pubkey, 'pair-redeem', { rid, code }, { retain: false })) sentCount++;
         }
-        pending.esperadas = enviadas;
+        pending.expected = sentCount;
         // Si ningún candidato remoto era alcanzable, se resuelve ya con lo local.
-        if (enviadas === 0) resolver();
+        if (sentCount === 0) resolve();
     }
 
     async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
@@ -3619,8 +3621,8 @@ async function start(port = Number(PORT)) {
                 const cutoffEnc = Date.now() - ENCPUB_TTL_MS;
                 persist.deleteExpiredEncPubs(cutoffEnc);
                 encPubs.clear();
-                for (const fila of persist.loadEncPubs(cutoffEnc)) {
-                    try { encPubs.set(fila.pubkey, { data: JSON.parse(fila.data), signature: fila.signature, ts: fila.ts }); }
+                for (const row of persist.loadEncPubs(cutoffEnc)) {
+                    try { encPubs.set(row.pubkey, { data: JSON.parse(row.data), signature: row.signature, ts: row.ts }); }
                     catch (_) {}
                 }
             } catch (e) { console.warn('[encpub] purge failed:', e.message); }
@@ -3753,7 +3755,7 @@ function setTurnIssuer(newIssuer) {
 // `applyFederationConfig` sale aquí por lo mismo que `setTurnIssuer`: es la costura
 // por donde entra la configuración de la bóveda, y probarla de verdad exige poder
 // llamarla con el servidor ya escuchando (que es justo cuando llega el bundle).
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, puedeSellar, _ringHint: ringHint };
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, canSeal, _ringHint: ringHint };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el

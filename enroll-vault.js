@@ -48,4 +48,4 @@ async function main() {
     console.log('  dotrino-vault secret set proxy TURN_KEY_API_TOKEN <token>');
 }
 
-main().catch((e) => { console.error('Enrolamiento falló:', e.message); process.exit(1); });
+main().catch((e) => { console.error('enroll failed:', e.message); process.exit(1); });

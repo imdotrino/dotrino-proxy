@@ -480,13 +480,13 @@ class Mesh {
      * handshake no se procesa ninguna otra trama.
      */
     handleInbound(ws) {
-        if (!this.identity) { try { ws.close(1011, 'nodo sin identidad'); } catch (_) {} return; }
+        if (!this.identity) { try { ws.close(1011, 'node without identity'); } catch (_) {} return; }
         const nonce = newNonce();
         let peer = null;
         const buckets = new PeerBuckets();
 
         const timer = setTimeout(() => {
-            if (!peer) { try { ws.close(1008, 'handshake s2s sin completar'); } catch (_) {} }
+            if (!peer) { try { ws.close(1008, 's2s handshake not completed'); } catch (_) {} }
         }, HELLO_TIMEOUT_MS);
         if (timer.unref) timer.unref();
 
@@ -510,7 +510,7 @@ class Mesh {
                 if (f.t !== 'hello') return;
                 const body = f.body;
                 if (!body || body.v !== 1 || body.nonce !== nonce || !body.from) {
-                    try { ws.close(1008, 'hello s2s inválido'); } catch (_) {}
+                    try { ws.close(1008, 'invalid s2s hello'); } catch (_) {}
                     return;
                 }
                 const known = this.registry.byNodePubkey(body.from);
@@ -527,7 +527,7 @@ class Mesh {
                 }
                 if (!verifyBody(body, f.signature, known.pubkey)) {
                     this.log(`[mesh] rejected: invalid hello signature from ${known.url}`);
-                    try { ws.close(1008, 'firma inválida'); } catch (_) {}
+                    try { ws.close(1008, 'invalid signature'); } catch (_) {}
                     return;
                 }
                 clearTimeout(timer);

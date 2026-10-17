@@ -23,7 +23,7 @@ describe('envío efímero', () => {
         for (;;) {
             const states = await Promise.all([a, b].map((n) => fetch(`${n.http}/peers`).then(r => r.json()).catch(() => null)));
             if (states.every((s) => s && Object.values(s.mesh || {}).some((m) => m.ready))) break;
-            if (Date.now() > deadline) throw new Error('la malla no se estableció');
+            if (Date.now() > deadline) throw new Error('the mesh did not come up');
             await sleep(300);
         }
     }, 60000);
@@ -65,8 +65,8 @@ describe('envío efímero', () => {
 
         // Y al conectarse después NO recibe nada: es la diferencia con la cola.
         const ca = await connectIdentified(a.url, ausente);
-        const nada = await ca.waitFor((m) => m.type === 'message', 1500).catch(() => null);
-        expect(nada).toBeNull();
+        const nothing = await ca.waitFor((m) => m.type === 'message', 1500).catch(() => null);
+        expect(nothing).toBeNull();
         await ca.close(); await cb.close();
     }, 20000);
 

@@ -42,7 +42,7 @@ export function connectClient(url) {
         const timeout = setTimeout(() => {
             if (resolved) return;
             try { ws.close(); } catch (_) { /* noop */ }
-            reject(new Error(`Timeout esperando 'connected' de ${url}`));
+            reject(new Error(`Timeout waiting for 'connected' from ${url}`));
         }, 3000);
 
         ws.on('message', (raw) => {
@@ -111,7 +111,7 @@ function buildClient(ws, getToken, recv, waiters) {
                 const timer = setTimeout(() => {
                     const idx = waiters.indexOf(entry);
                     if (idx >= 0) waiters.splice(idx, 1);
-                    reject(new Error(`Timeout esperando mensaje. Recibidos: ${JSON.stringify(recv)}`));
+                    reject(new Error(`Timeout waiting for a message. Received: ${JSON.stringify(recv)}`));
                 }, timeout);
 
                 const entry = { predicate: wrappedPredicate, resolve, timer };

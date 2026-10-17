@@ -105,14 +105,14 @@ export async function startNode({ name, dir, peers = [], port, env = {} } = {}) 
 
     const deadline = Date.now() + 15000;
     for (;;) {
-        if (died !== null) throw new Error(`[${name}] murió (code ${died}):\n${log.join('\n')}`);
+        if (died !== null) throw new Error(`[${name}] died (code ${died}):\n${log.join('\n')}`);
         try {
             const r = await fetch(`${node.http}/health`);
             if (r.ok) break;
         } catch (_) { /* todavía no escucha */ }
         if (Date.now() > deadline) {
             await node.stop();
-            throw new Error(`[${name}] no arrancó a tiempo:\n${log.join('\n')}`);
+            throw new Error(`[${name}] did not start in time:\n${log.join('\n')}`);
         }
         await sleep(120);
     }
@@ -162,7 +162,7 @@ export function connectTo(url) {
                     waitFor: (pred, ms = 6000) => new Promise((res, rej) => {
                         const hit = recv.find(pred);
                         if (hit) return res(hit);
-                        const timer = setTimeout(() => rej(new Error(`timeout esperando; recibido: ${JSON.stringify(recv)}`)), ms);
+                        const timer = setTimeout(() => rej(new Error(`timeout waiting; received: ${JSON.stringify(recv)}`)), ms);
                         listeners.push({ pred, done: (msg) => { clearTimeout(timer); res(msg); } });
                     }),
                     // `close()` hace el handshake de cierre y espera la respuesta
@@ -207,7 +207,7 @@ export async function connectIdentified(url, user, { app } = {}) {
     const data = { op: 'identify', publickey: user.publickey, token: c.token, ts: Date.now() };
     c.send({ type: 'identify', data, signature: user.sign(data), ...(app ? { app } : {}) });
     const res = await c.waitFor((m) => m.type === 'identified' || m.type === 'error');
-    if (res.type === 'error') throw new Error('identify falló: ' + res.error);
+    if (res.type === 'error') throw new Error('identify failed: ' + res.error);
     return c;
 }
 

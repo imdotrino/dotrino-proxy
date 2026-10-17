@@ -130,7 +130,7 @@ describe('core: connection & messaging', () => {
             const a = await connect();
             a.send({ to: [], message: 'vacío' });
             const err = await a.waitFor((m) => m.type === 'error');
-            expect(err.error).toMatch(/al menos un token/i);
+            expect(err.code).toBe('no-targets');
         });
     });
 

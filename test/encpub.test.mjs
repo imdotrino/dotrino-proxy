@@ -56,15 +56,15 @@ async function identify(client, id) {
 // mira también lo YA recibido, así que sin esto la segunda respuesta es la primera.
 async function announce(client, id, { body, signer } = {}) {
     const data = body || encPubBody(id);
-    const esperada = client.waitFor((m) => m.type === 'encpub-announced' || m.type === 'error', { fromNow: true });
+    const expected = client.waitFor((m) => m.type === 'encpub-announced' || m.type === 'error', { fromNow: true });
     client.send({ type: 'encpub', data, signature: (signer || id).sign(data) });
-    return esperada;
+    return expected;
 }
 
 async function lookup(client, publickeys) {
-    const esperada = client.waitFor((m) => m.type === 'enc-lookup' || m.type === 'error', { fromNow: true });
+    const expected = client.waitFor((m) => m.type === 'enc-lookup' || m.type === 'error', { fromNow: true });
     client.send({ type: 'enc-lookup', publickeys });
-    return esperada;
+    return expected;
 }
 
 describe('directorio de llaves de cifrado', () => {
@@ -81,22 +81,22 @@ describe('directorio de llaves de cifrado', () => {
         expect(res.stored).toBe(true);
 
         // Otro, que no se ha emparejado con ella ni la conoce de nada.
-        const otro = await connectClient(url);
-        const r = await lookup(otro, [ana.publickey]);
+        const other = await connectClient(url);
+        const r = await lookup(other, [ana.publickey]);
         expect(r.keys).toHaveLength(1);
         // El sobre completo: sin la firma, quien pregunta tendría que fiarse del proxio.
         expect(r.keys[0].data.encpub).toBe(ana.encPub);
         expect(typeof r.keys[0].signature).toBe('string');
         expect(r.keys[0].data.publickey).toBe(ana.publickey);
         await c.close();
-        await otro.close();
+        await other.close();
     });
 
     it('el anuncio del anuncio ajeno NO entra: nadie anuncia por otro', async () => {
         const ana = makeIdentity();
-        const bruto = makeIdentity();
+        const rawStatement = makeIdentity();
         const c = await connectClient(url);
-        await identify(c, bruto);
+        await identify(c, rawStatement);
         // Firmado por ana (válido) pero anunciado desde la conexión de bruto.
         const res = await announce(c, ana);
         expect(res.type).toBe('error');
@@ -109,12 +109,12 @@ describe('directorio de llaves de cifrado', () => {
 
     it('la llave de otro con MI firma no cuela', async () => {
         const ana = makeIdentity();
-        const ladron = makeIdentity();
+        const thief = makeIdentity();
         const c = await connectClient(url);
         await identify(c, ana);
         // El cuerpo dice que es de ana, pero la firma es del ladrón: así es como se
         // sustituiría la llave para poder leer.
-        const res = await announce(c, ana, { signer: ladron });
+        const res = await announce(c, ana, { signer: thief });
         expect(res.type).toBe('error');
         await c.close();
     });
@@ -134,9 +134,9 @@ describe('directorio de llaves de cifrado', () => {
         await announce(c, ana);
 
         // El mismo perfil, llave de cifrado distinta, pero fechado ANTES.
-        const vieja = makeIdentity();
-        const cuerpoViejo = { ...encPubBody(ana, Date.now() - 60_000), encpub: vieja.encPub };
-        const res = await announce(c, ana, { body: cuerpoViejo });
+        const old = makeIdentity();
+        const oldBody = { ...encPubBody(ana, Date.now() - 60_000), encpub: old.encPub };
+        const res = await announce(c, ana, { body: oldBody });
         expect(res.type).toBe('encpub-announced');
         expect(res.stored).toBe(false);
 
@@ -146,11 +146,11 @@ describe('directorio de llaves de cifrado', () => {
     });
 
     it('lo que no está se dice en `missing`, no se calla', async () => {
-        const nadie = makeIdentity();
+        const nobody = makeIdentity();
         const c = await connectClient(url);
-        const r = await lookup(c, [nadie.publickey]);
+        const r = await lookup(c, [nobody.publickey]);
         expect(r.keys).toHaveLength(0);
-        expect(r.missing).toEqual([nadie.publickey]);
+        expect(r.missing).toEqual([nobody.publickey]);
         await c.close();
     });
 
@@ -158,8 +158,8 @@ describe('directorio de llaves de cifrado', () => {
         const ana = makeIdentity();
         const c = await connectClient(url);
         await identify(c, ana);
-        const cuerpo = { ...encPubBody(ana), encpub: 'no-soy-un-jwk' };
-        const res = await announce(c, ana, { body: cuerpo });
+        const bodyObj = { ...encPubBody(ana), encpub: 'no-soy-un-jwk' };
+        const res = await announce(c, ana, { body: bodyObj });
         expect(res.type).toBe('error');
         await c.close();
     });

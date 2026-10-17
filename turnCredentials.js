@@ -137,7 +137,7 @@ function createTurnIssuer(opts = {}) {
         }
         const body = await res.json();
         const iceServers = normalizeIceServers(body);
-        if (!iceServers) throw new Error('Cloudflare TURN API: respuesta sin iceServers');
+        if (!iceServers) throw new Error('Cloudflare TURN API: reply without iceServers');
         return iceServers;
     }
 
