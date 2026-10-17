@@ -617,8 +617,10 @@ function registerHome(pubkey) {
     homePubkeys.add(pubkey);
     try { persist.upsertHome(pubkey, Date.now()); } catch (_) {}
 }
-// ¿Este proxy es responsable de encolar para pubkey? (identificó acá, o está online acá)
-function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(pubkey); }
+// ¿Este proxy es responsable de encolar para pubkey? (identificó acá, o está online acá, o
+// es una bóveda que se despierta desde acá: esa puede dormir más que el TTL del home, y su
+// registro es permanente — se quita solo cuando su URL contesta que ya no existe).
+function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(pubkey) || !!pushSubscriptions.get(pubkey)?.has(WAKE_APP); }
 
 // Reenvía un mensaje por pubkey a todos los peers (fire-and-forget). El payload
 // va opaco (cifrado E2E por el cliente); los proxies son tránsito ciego.
@@ -1208,6 +1210,67 @@ function ringHint(msgBody) {
     return null;
 }
 
+// ----- Despertar a una bóveda que no vive conectada -----------------------
+//
+// Una bóveda en una función (AWS Lambda) solo existe mientras trabaja. Registra una URL
+// (`push-subscribe` con `{ kind:'wake', url }`) y aquí se la llama cuando llega algo para su
+// cuenta y no hay nadie suyo conectado. El mensaje ya quedó en la cola: al identificarse lo
+// recibe. La URL lleva su propio secreto, así que no hace falta firmar el POST.
+const WAKE_APP = 'wake';
+/** Lo que tarda una bóveda en arrancar y conectarse: dentro de esta ventana no se repite. */
+const WAKE_DEDUP_MS = 90_000;
+const wakingUntil = new Map();   // profileId -> ms hasta el que no se vuelve a llamar
+
+const WAKE_CHANNEL_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+
+function parseWakeSubscription(sub) {
+    if (!sub || sub.kind !== 'wake' || typeof sub.url !== 'string' || sub.url.length > 2048) return null;
+    let u;
+    try { u = new URL(sub.url); } catch (_) { return null; }
+    const local = u.hostname === '127.0.0.1' || u.hostname === 'localhost';
+    // HTTPS siempre: la URL lleva el secreto. HTTP solo hacia esta misma máquina en pruebas.
+    if (u.protocol !== 'https:' && !(local && u.protocol === 'http:' && process.env.NODE_ENV === 'test')) return null;
+    if (sub.channel !== undefined && (typeof sub.channel !== 'string' || !WAKE_CHANNEL_RE.test(sub.channel))) return null;
+    return { kind: 'wake', url: u.toString(), ...(sub.channel ? { channel: sub.channel } : {}) };
+}
+
+/**
+ * EL CANAL TAMBIÉN DESPIERTA. Quien entra con usuario y contraseña no conoce la llave de la
+ * bóveda: la busca en su canal (`dotrino-vault-<código>`), y ese canal solo tiene a alguien
+ * mientras la bóveda está conectada. Así que una bóveda que se despierta dice también su
+ * canal, y listarlo vacío la llama.
+ *
+ * El canal no prueba nada (cualquiera puede decir uno), y por eso es un CONJUNTO: decir el
+ * canal de otra cuenta solo hace que te despierten a ti cuando la buscan a ella; a ella la
+ * siguen despertando igual.
+ */
+function wakesForChannel(channel) {
+    const out = [];
+    for (const [pubkey, subs] of pushSubscriptions) {
+        const w = subs.get(WAKE_APP);
+        if (w && w.channel === channel) out.push([pubkey, w]);
+    }
+    return out;
+}
+
+function wakeVault(pubkey, sub) {
+    // Conectada no se despierta: ya recibió el mensaje en vivo.
+    if (pubkeyToTokens.get(pubkey)?.size) return;
+    const now = Date.now();
+    if ((wakingUntil.get(pubkey) || 0) > now) return;
+    wakingUntil.set(pubkey, now + WAKE_DEDUP_MS);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10_000);
+    fetch(sub.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'wake', ts: now }), signal: ctrl.signal })
+        .then((r) => {
+            if (r.status === 404 || r.status === 410) { removePushSubscription(pubkey, WAKE_APP); console.log(`[wake] the vault is gone (${r.status}): wake removed`); }
+            else if (!r.ok) { wakingUntil.delete(pubkey); console.error(`[wake] the vault did not take the wake: HTTP ${r.status}`); }
+            else console.log('[wake] vault woken');
+        })
+        .catch((e) => { wakingUntil.delete(pubkey); console.error('[wake] could not reach the vault:', e.message); })
+        .finally(() => clearTimeout(t));
+}
+
 // Dispara el "timbre". Best-effort: si la subscription está muerta (404/410) la
 // borramos; el mensaje ya quedó encolado de todos modos.
 function ringPush(pubkey, app, extra) {
@@ -1219,6 +1282,7 @@ function ringPush(pubkey, app, extra) {
 }
 
 function ringOne(pubkey, subApp, sub, extra) {
+    if (sub.kind === 'wake') return wakeVault(pubkey, sub);
     const ring = { type: 'ring', ts: Date.now(), ...(extra || {}) };
     // Lo que sabe del pedido (`why`) SOLO viaja por Web Push, que va cifrado hasta el
     // navegador. FCM y APNs lo leen Google y Apple: a ellos, el timbre vacío de siempre.
@@ -2057,7 +2121,7 @@ wss.on('connection', (ws, req) => {
         // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
         protocol: 2,
         speaks: [1, 2],
-        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary'],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake'],
         timestamp: new Date().toISOString()
     }));
     
@@ -2474,17 +2538,24 @@ wss.on('connection', (ws, req) => {
                 const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
                 applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
             }
+            // El timbre de la bóveda vive donde ella lo registró, que puede ser este nodo.
+            for (const [pubkey, w] of wakesForChannel(channelName)) wakeVault(pubkey, w);
             forwardChannelOp(ws, message, home.owner, 'list', { channel: channelName });
             return;
         }
 
         // Obtener tokens del canal (ya filtrados por expiración)
         const tokens = getChannelTokens(channelName);
+        // Vacío y con una bóveda que se despierta detrás: se la llama y se dice, para que quien
+        // lista espere unos segundos en vez de concluir que esa cuenta no existe.
+        const waking = tokens.length === 0 ? wakesForChannel(channelName) : [];
+        for (const [pubkey, w] of waking) wakeVault(pubkey, w);
         
         const response = {
             type: 'channel_list',
             channel: channelName,
             tokens: tokens,
+            ...(waking.length ? { waking: true } : {}),
             count: tokens.length,
             maxEntries: MAX_CHANNEL_ENTRIES,
             timestamp: new Date().toISOString()
@@ -2949,6 +3020,23 @@ wss.on('connection', (ws, req) => {
             // Dos formas: la PushSubscription del navegador (endpoint + keys) o el token de
             // la app nativa (`{ kind:'fcm', token }` en Android, `{ kind:'apns', token, topic, env }`
             // en iOS). Cualquier otra cosa no es una suscripción.
+            // EL TIMBRE DE UNA BÓVEDA QUE NO VIVE CONECTADA (`{ kind:'wake', url }`): lo firma su
+            // llave de comunicación y el acta prueba que es de la cuenta, así que se guarda para
+            // la CUENTA, que es a quien le escriben los servicios. Sin acta válida no hay timbre.
+            const wake = parseWakeSubscription(subscription);
+            if (wake) {
+                const profileId = verifyActaMembership(message.acta, data.publickey);
+                if (!profileId) {
+                    const e = { type: 'error', code: 'not-a-member', error: 'push-subscribe (wake): the record does not name this key' };
+                    applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+                }
+                setPushSubscription(profileId, WAKE_APP, wake);
+                registerHome(profileId);
+                const response = { type: 'push-subscribed', publickey: profileId, app: WAKE_APP };
+                applyMessageIds(response, message);
+                ws.send(JSON.stringify(response));
+                return;
+            }
             const isWeb = subscription && typeof subscription.endpoint === 'string';
             const isFcm = subscription && subscription.kind === 'fcm' && typeof subscription.token === 'string' && subscription.token.length > 20 && subscription.token.length < 4096;
             const apns = parseApnsSubscription(subscription);

@@ -23,7 +23,7 @@ Al conectarse, el servidor responde con:
   "peers": ["<ids de los nodos que conoce>"],
   "protocol": 2,
   "speaks": [1, 2],
-  "caps": ["channels", "pubkey-routing", "offline-queue", "pairing-codes", "push", "turn", "encpub"],
+  "caps": ["channels", "pubkey-routing", "offline-queue", "pairing-codes", "push", "turn", "encpub", "wake"],
   "timestamp": "2026-03-01T04:33:38.141Z"
 }
 ```
@@ -643,3 +643,17 @@ PORT=4002 node server.js
 ## Testing
 ```bash
 node testSimple.js
+
+## Despertar a una bóveda que no vive conectada (1.7.0+)
+
+Una bóveda en una función (AWS Lambda) registra una URL con `push-subscribe` y
+`subscription: { kind: 'wake', url, channel? }`, firmado por su llave de comunicación y con
+el `acta` en el frame (prueba que la llave es de la cuenta; si no, `not-a-member`). Se guarda
+para la **cuenta** (`profileId`) y es **permanente** (SQLite): solo se quita cuando la URL
+contesta 404/410. Mientras exista, este nodo es el home de esa cuenta aunque pase más de
+`PROXY_HOME_TTL_MS` sin identificarse.
+
+- Llega algo para la cuenta y no hay nadie suyo conectado: se encola como siempre y se hace
+  `POST url` con `{ op:'wake', ts }`. Como mucho una vez cada 90 s.
+- `list` de `channel` vacío también la llama, y la respuesta trae `waking: true`.
+- La URL tiene que ser HTTPS y llevar su propio secreto: el POST no va firmado.
