@@ -1,6 +1,6 @@
 {
   "name": "websocket-proxy",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "description": "WebSocket proxy with UUID validation using ws ",
   "main": "server.js",
   "scripts": {
@@ -13,10 +13,10 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@dotrino/identity": "0.117.2",
+    "@dotrino/identity": "0.119.0",
     "@dotrino/proxy-client": "0.36.1",
-    "@dotrino/update": "0.1.1",
-    "@dotrino/vault": "0.87.0",
+    "@dotrino/update": "0.9.0",
+    "@dotrino/vault": "0.90.1",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.0.0",
     "web-push": "^3.6.7",
