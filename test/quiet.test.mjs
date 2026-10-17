@@ -95,4 +95,32 @@ describe('envío callado (quiet)', () => {
             await vuelve.close(); await bóveda.close();
         }, 30000);
     }
+    // EN VIVO TAMBIÉN TIMBRA: la conexión que el proxio cree viva puede estar muerta (un
+    // teléfono en segundo plano), y lo que se le entrega ahí no lo ve nadie. La app decide
+    // qué hace con el timbre; el proxio no adivina si «está».
+    for (const [caso, idx] of [['sin federación', 0], ['con federación', 1]]) {
+        it(`${caso}: entregado en vivo timbra igual; callado y efímero no`, async () => {
+            const node = nodes[idx];
+            const telefono = makeUser();
+            const ct = await connectIdentified(node.url, telefono);
+            await subscribe(ct, telefono);
+            const bóveda = await connectTo(node.url);
+
+            let before = hits;
+            bóveda.send({ to_publickey: telefono.publickey, message: 'pedido', id: 'v1' });
+            await ct.waitFor((m) => m.type === 'message' && m.message === 'pedido');
+            expect(await hitsAfter(before)).toBeGreaterThan(0);
+
+            before = hits;
+            bóveda.send({ to_publickey: telefono.publickey, message: 'callado', quiet: true, id: 'v2' });
+            await ct.waitFor((m) => m.type === 'message' && m.message === 'callado');
+            expect(await hitsAfter(before)).toBe(0);
+
+            before = hits;
+            bóveda.send({ to_publickey: telefono.publickey, message: 'jugada', ephemeral: true, id: 'v3' });
+            await ct.waitFor((m) => m.type === 'message' && m.message === 'jugada');
+            expect(await hitsAfter(before)).toBe(0);
+            await ct.close(); await bóveda.close();
+        }, 30000);
+    }
 });

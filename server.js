@@ -680,7 +680,11 @@ async function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expires
             } catch (_) {}
         }
     }
-    if (delivered > 0) return { delivered };
+    if (delivered > 0) {
+        // EN VIVO TAMBIÉN TIMBRA (ver handlePubkeyAddressedMessage).
+        if (!quiet && !ephemeral) ringPush(toPubkey, app, ringHint(msgBody));
+        return { delivered };
+    }
     // Efímero: o llegaba ahora o no llega. No se encola ni siendo el home.
     if (ephemeral) return { dropped: true };
     if (isHome(toPubkey)) {
@@ -3368,8 +3372,18 @@ wss.on('connection', (ws, req) => {
                         totalDeliveries++;
                     } catch (_) { /* skip esa instancia, intenta las demás */ }
                 }
-                if (anySent) sentInline.push(pk);
-                else failed.push(pk);
+                if (anySent) {
+                    sentInline.push(pk);
+                    // EL TIMBRE SUENA SIEMPRE, también cuando se entrega en vivo, y la app
+                    // decide qué hace con él (dueño, 2026-10-16). Una conexión que el proxio
+                    // cree viva puede estar muerta: un teléfono que pasó a segundo plano tarda
+                    // hasta un minuto en caer por el latido, y lo que se le entrega ahí no lo
+                    // ve nadie — así no llegó un pedido de aprobación hasta cerrar y abrir la
+                    // app. Adivinar aquí si la app «está» es justo lo que fallaba. Solo no
+                    // suenan los callados (los marca quien envía) y los efímeros (tiempo real:
+                    // tarde no sirven).
+                    if (!quiet && !ephemeral) ringPush(pk, app, ringHint(message.message));
+                } else failed.push(pk);
             } else if (PROXY_PEERS.length) {
                 // Federación: no hay instancias locales → reenviar a la malla (un
                 // peer puede tener al destinatario online, o ser su home y encolar).
