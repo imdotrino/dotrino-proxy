@@ -1905,8 +1905,8 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             audience: PROXY_AUDIENCE,
             enforcing: PROXY_AUDIENCE_ENFORCE,
-            clientesSinAudiencia: identifyWithoutAudience.size,
-            identifiesSinAudiencia: [...identifyWithoutAudience.values()].reduce((a, b) => a + b, 0)
+            clientsWithoutAudience: identifyWithoutAudience.size,
+            identifiesWithoutAudience: [...identifyWithoutAudience.values()].reduce((a, b) => a + b, 0)
         }));
         return;
     }
