@@ -1231,7 +1231,12 @@ function parseWakeSubscription(sub) {
     // HTTPS siempre: la URL lleva el secreto. HTTP solo hacia esta misma máquina en pruebas.
     if (u.protocol !== 'https:' && !(local && u.protocol === 'http:' && process.env.NODE_ENV === 'test')) return null;
     if (sub.channel !== undefined && (typeof sub.channel !== 'string' || !WAKE_CHANNEL_RE.test(sub.channel))) return null;
-    return { kind: 'wake', url: u.toString(), ...(sub.channel ? { channel: sub.channel } : {}) };
+    if (sub.self !== undefined && sub.self !== true) return null;
+    // `self`: el timbre es de la LLAVE que firma, no de la cuenta. Lo usa una réplica que vive
+    // en una función: no entra como la cuenta, se identifica con su llave, y es a esa llave a
+    // la que le escribe un servicio cuando la bóveda no contesta. Un canal no tiene sentido ahí.
+    if (sub.self && sub.channel) return null;
+    return { kind: 'wake', url: u.toString(), ...(sub.channel ? { channel: sub.channel } : {}), ...(sub.self ? { self: true } : {}) };
 }
 
 /**
@@ -2121,7 +2126,7 @@ wss.on('connection', (ws, req) => {
         // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
         protocol: 2,
         speaks: [1, 2],
-        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake'],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake', 'wake-self'],
         timestamp: new Date().toISOString()
     }));
     
@@ -3032,9 +3037,12 @@ wss.on('connection', (ws, req) => {
                     const e = { type: 'error', code: 'not-a-member', error: 'push-subscribe (wake): the record does not name this key' };
                     applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
                 }
-                setPushSubscription(profileId, WAKE_APP, wake);
-                registerHome(profileId);
-                const response = { type: 'push-subscribed', publickey: profileId, app: WAKE_APP };
+                // Con `self` se guarda para quien firma (un miembro de esa cuenta); sin él, para
+                // la cuenta. Las dos plazas son distintas: una réplica no le quita la suya a la bóveda.
+                const owner = wake.self ? data.publickey : profileId;
+                setPushSubscription(owner, WAKE_APP, wake);
+                registerHome(owner);
+                const response = { type: 'push-subscribed', publickey: owner, app: WAKE_APP };
                 applyMessageIds(response, message);
                 ws.send(JSON.stringify(response));
                 return;

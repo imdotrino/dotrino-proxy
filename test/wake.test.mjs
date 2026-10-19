@@ -9,12 +9,13 @@ import { actaBody } from '@dotrino/identity/acta';
 // DESPERTAR A UNA BÓVEDA QUE NO VIVE CONECTADA (la de una Lambda). Registra una URL con su
 // llave de comunicación y el acta; si llega algo para su CUENTA y no hay nadie conectado, el
 // proxio encola y llama a la URL. Al identificarse, la bóveda recibe lo encolado.
-async function actaWith (master, comm) {
+async function actaWith (master, comm, extra = []) {
     const bodyObj = {
         v: 5, profileId: master.publickey, sealedBy: master.publickey, seq: 1,
         members: [
             { pub: master.publickey, caps: ['sign', 'read', 'store', 'sealer'] },
-            { pub: comm.publickey, caps: ['sign'], cn: 'vault' }
+            { pub: comm.publickey, caps: ['sign'], cn: 'vault' },
+            ...extra
         ],
         renounced: [], keyring: [], sealPub: null, sealSince: 0, sealKeys: [], updatedAt: Date.now()
     };
@@ -56,8 +57,8 @@ describe('despertar a una bóveda', () => {
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
     });
 
-    const register = async (c, comm, acta, url, channel) => {
-        const data = { op: 'push-subscribe', publickey: comm.publickey, ts: Date.now(), subscription: JSON.stringify({ kind: 'wake', url, ...(channel ? { channel } : {}) }) };
+    const register = async (c, comm, acta, url, channel, self) => {
+        const data = { op: 'push-subscribe', publickey: comm.publickey, ts: Date.now(), subscription: JSON.stringify({ kind: 'wake', url, ...(channel ? { channel } : {}), ...(self ? { self: true } : {}) }) };
         c.send({ type: 'push-subscribe', data, signature: comm.sign(data), acta });
         return c.waitFor((m) => m.type === 'push-subscribed' || m.type === 'error');
     };
@@ -96,6 +97,50 @@ describe('despertar a una bóveda', () => {
         expect(id.queued_delivered).toBe(2);
         v2.close();
         sender.close();
+    }, 30000);
+
+    it('una réplica tiene su propio timbre (self): la despierta lo que va a SU llave, y no le quita el suyo a la bóveda', async () => {
+        const master = await makeDeviceKey();
+        const comm = makeUser();
+        const replica = makeUser();
+        const acta = await actaWith(master, comm, [{ pub: replica.publickey, caps: ['replica'] }]);
+        const v = await connectIdentified(node.url, comm);
+        expect((await register(v, comm, acta, `http://127.0.0.1:${wakePort}/boveda`)).publickey).toBe(master.publickey);
+        v.close();
+        const rc = await connectIdentified(node.url, replica);
+        const r = await register(rc, replica, acta, `http://127.0.0.1:${wakePort}/replica`, null, true);
+        expect(r.type).toBe('push-subscribed');
+        expect(r.publickey).toBe(replica.publickey);
+        rc.close();
+        await sleep(200);
+
+        const sender = await connectIdentified(node.url, makeUser());
+        let before = hits.length;
+        sender.send({ to_publickey: replica.publickey, message: 'a-la-replica', id: 's1' });
+        await sleep(600);
+        expect(hits.slice(before).map((h) => h.url)).toEqual(['/replica'])
+        before = hits.length;
+        sender.send({ to_publickey: master.publickey, message: 'a-la-cuenta', id: 's2' });
+        await sleep(600);
+        expect(hits.slice(before).map((h) => h.url)).toEqual(['/boveda'])
+
+        // Al identificarse, la réplica recibe lo que se le encoló a ella.
+        const r2 = await connectTo(node.url);
+        const data = { op: 'identify', publickey: replica.publickey, token: r2.token, ts: Date.now() };
+        r2.send({ type: 'identify', data, signature: replica.sign(data) });
+        const id = await r2.waitFor((m) => m.type === 'identified');
+        expect(id.queued_delivered).toBe(1);
+        r2.close(); sender.close();
+    }, 30000);
+
+    it('self con canal no es un timbre', async () => {
+        const master = await makeDeviceKey();
+        const comm = makeUser();
+        const acta = await actaWith(master, comm);
+        const v = await connectIdentified(node.url, comm);
+        const r = await register(v, comm, acta, `http://127.0.0.1:${wakePort}/x`, 'dotrino-vault-AB12-CD34-EF56', true);
+        expect(r.type).toBe('error');
+        v.close();
     }, 30000);
 
     it('con la bóveda conectada no se la despierta', async () => {
