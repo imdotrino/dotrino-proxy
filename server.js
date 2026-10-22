@@ -1367,7 +1367,8 @@ function runScheduledPushes() {
     for (const job of due) {
         let extra;
         try { extra = job.payload ? JSON.parse(job.payload) : undefined; } catch (_) { extra = undefined; }
-        ringPush(job.pubkey, null, extra);   // un recordatorio propio: a todas sus apps
+        // Suena en la app que lo programó; uno sin app (cliente viejo), en todas.
+        ringPush(job.pubkey, job.app || null, extra);
         if (job.cron) {
             const next = cronNextFire(job.cron, job.tz, now);
             if (next) persist.updateScheduledPushNextFire(job.id, next);
@@ -3245,7 +3246,8 @@ wss.on('connection', (ws, req) => {
                 }
             }
             const payload = spec.payload ? JSON.stringify(spec.payload) : null;
-            const jobId = persist.insertScheduledPush({ pubkey: data.publickey, payload, nextFire, cron, tz });
+            // `data.app` va DENTRO de lo firmado, como en push-subscribe: el timbre es dirigido.
+            const jobId = persist.insertScheduledPush({ pubkey: data.publickey, app: appOf(data.app), payload, nextFire, cron, tz });
             const response = { type: 'push-scheduled', jobId, nextFire };
             applyMessageIds(response, message);
             ws.send(JSON.stringify(response));
@@ -3279,6 +3281,7 @@ wss.on('connection', (ws, req) => {
             const rows = persist.listScheduledPushesForPubkey(data.publickey);
             const jobs = rows.map(r => ({
                 jobId: r.id,
+                app: r.app || null,
                 nextFire: r.next_fire,
                 cron: r.cron || null,
                 tz: r.tz || null,

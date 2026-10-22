@@ -109,6 +109,9 @@ function init(dbFile) {
             ALTER TABLE push_subscriptions_v2 RENAME TO push_subscriptions;
         `);
     }
+    // Y el recordatorio programado también dice su app: suena en la que lo pidió, no en todas.
+    const schedCols = db.prepare('PRAGMA table_info(scheduled_pushes)').all().map((c) => c.name);
+    if (schedCols.length && !schedCols.includes('app')) db.exec('ALTER TABLE scheduled_pushes ADD COLUMN app TEXT;');
     // Y la cola dice para qué app es cada mensaje: cada app baja lo suyo y no lo de las demás.
     const queueCols = db.prepare('PRAGMA table_info(offline_queue)').all().map((c) => c.name);
     if (!queueCols.includes('app')) db.exec('ALTER TABLE offline_queue ADD COLUMN app TEXT;');
@@ -279,18 +282,18 @@ function deleteExpired(now) {
 
 // ----- scheduled pushes (auto-recordatorios; target = owner pubkey) ------
 
-function insertScheduledPush({ pubkey, payload, nextFire, cron, tz }) {
+function insertScheduledPush({ pubkey, app, payload, nextFire, cron, tz }) {
     const now = Date.now();
     const info = db.prepare(`
-        INSERT INTO scheduled_pushes (pubkey, payload, next_fire, cron, tz, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(pubkey, payload || null, nextFire, cron || null, tz || null, now, now);
+        INSERT INTO scheduled_pushes (pubkey, app, payload, next_fire, cron, tz, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(pubkey, app || null, payload || null, nextFire, cron || null, tz || null, now, now);
     return Number(info.lastInsertRowid);
 }
 
 function listScheduledPushesForPubkey(pubkey) {
     return db.prepare(`
-        SELECT id, pubkey, payload, next_fire, cron, tz, created_at, updated_at
+        SELECT id, pubkey, app, payload, next_fire, cron, tz, created_at, updated_at
         FROM scheduled_pushes WHERE pubkey = ? ORDER BY next_fire ASC
     `).all(pubkey);
 }

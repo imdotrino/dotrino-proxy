@@ -46,7 +46,7 @@ describe('timbre y cola por app', () => {
             (req, res) => { hits.push(req.url.slice(1)); req.resume(); res.writeHead(201); res.end(); });
         await new Promise((r) => pushServer.listen(pushPort, '127.0.0.1', r));
         dir = makeNodeDir('timbre-app');
-        node = await startNode({ name: 'SOLO', dir, port: await freePort(), env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' } });
+        node = await startNode({ name: 'SOLO', dir, port: await freePort(), env: { NODE_TLS_REJECT_UNAUTHORIZED: '0', SCHED_TICK_MS: '200' } });
     }, 60000);
 
     afterAll(async () => {
@@ -132,6 +132,27 @@ describe('timbre y cola por app', () => {
         await sender.waitFor((m) => m.type === 'message_sent' && m.id === 'r1');
         expect(await rungSince(i)).toEqual(['vault']);
         await sender.close();
+    }, 30000);
+
+    it('un recordatorio programado suena en la app que lo programó (y uno sin app, en todas)', async () => {
+        const phone = makeUser();
+        const c = await connectIdentified(node.url, phone);
+        await subscribe(c, phone, 'messenger', 'sched-messenger');
+        await subscribe(c, phone, 'expenses', 'sched-expenses');
+        const schedule = async (app) => {
+            const spec = JSON.stringify({ fireAt: Date.now() + 400, payload: { title: 'Expenses' } });
+            const data = { op: 'schedule-push', publickey: phone.publickey, spec, ts: Date.now(), ...(app ? { app } : {}) };
+            c.send({ type: 'schedule-push', data, signature: phone.sign(data) });
+            const r = await c.waitFor((m) => m.type === 'push-scheduled' || m.type === 'error');
+            expect(r.type).toBe('push-scheduled');
+        };
+        let i = hits.length;
+        await schedule('expenses');
+        expect(await rungSince(i, 1500)).toEqual(['sched-expenses']);
+        i = hits.length;
+        await schedule(null);
+        expect(await rungSince(i, 1500)).toEqual(['sched-expenses', 'sched-messenger']);
+        await c.close();
     }, 30000);
 
     it('push-prune: el receptor dice qué llaves le quedan y deja de sonar con las demás', async () => {
