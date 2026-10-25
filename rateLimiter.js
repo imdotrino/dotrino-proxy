@@ -62,27 +62,33 @@ function buildEffectiveLimits() {
   return merged;
 }
 
-function makeBucket(burst, ratePerSec) {
-  return { tokens: burst, lastRefill: Date.now(), burst, ratePerSec };
+// UNA cubeta lleva los DOS niveles (aviso `s` y corte `h`) con un solo reloj `t`, y no
+// guarda sus límites: son los mismos para todas las conexiones y se leen de la tabla.
+// Antes cada conexión cargaba dos árboles de cubetas con su `burst` y su `ratePerSec`
+// copiados dentro (~1 KB por bóveda conectada, medido el 2026-10-25).
+//
+// Compartir el reloj no cambia nada: rellenar es lineal y con tope, así que rellenar el
+// nivel de aviso en el momento del corte —sin gastar de él— da lo mismo que rellenarlo
+// después de una vez.
+function makeBucket(lim, now) {
+  return { s: lim.soft.burst, h: lim.hard.burst, t: now };
 }
 
-function refill(bucket, now) {
-  if (now <= bucket.lastRefill) return;
-  const elapsedSec = (now - bucket.lastRefill) / 1000;
-  const refilled = elapsedSec * bucket.ratePerSec;
-  bucket.tokens = Math.min(bucket.burst, bucket.tokens + refilled);
-  bucket.lastRefill = now;
+function refill(bucket, lim, now) {
+  if (now <= bucket.t) return;
+  const elapsedSec = (now - bucket.t) / 1000;
+  bucket.s = Math.min(lim.soft.burst, bucket.s + elapsedSec * lim.soft.ratePerSec);
+  bucket.h = Math.min(lim.hard.burst, bucket.h + elapsedSec * lim.hard.ratePerSec);
+  bucket.t = now;
 }
 
-function tryConsume(bucket, now) {
-  refill(bucket, now);
-  if (bucket.tokens >= 1) {
-    bucket.tokens -= 1;
-    return { ok: true };
+// Gasta una ficha del nivel `tier` ('s' o 'h'). Devuelve 0 si había, o cuántos ms faltan.
+function take(bucket, tier, rate) {
+  if (bucket[tier] >= 1) {
+    bucket[tier] -= 1;
+    return 0;
   }
-  const missing = 1 - bucket.tokens;
-  const retry_after_ms = Math.ceil((missing / bucket.ratePerSec) * 1000);
-  return { ok: false, retry_after_ms };
+  return Math.ceil(((1 - bucket[tier]) / rate) * 1000);
 }
 
 function createRateLimiter(options) {
@@ -117,35 +123,28 @@ function createRateLimiter(options) {
     };
   }
 
+  // Límites de los dos niveles juntos, por tipo: `{ soft, hard }`.
+  const pairs = {};
+  for (const k of Object.keys(softLimits)) pairs[k] = { soft: softLimits[k], hard: hardLimits[k] };
+  const limitsFor = (type) => pairs[type] || pairs.message;
+
   const tokens = new Map();
   const ipBans = new Map();
 
-  function getOrCreate(token) {
+  function getOrCreate(token, now) {
     let entry = tokens.get(token);
     if (!entry) {
-      entry = {
-        soft: {
-          global: makeBucket(softLimits.__global__.burst, softLimits.__global__.ratePerSec),
-          types: new Map()
-        },
-        hard: {
-          global: makeBucket(hardLimits.__global__.burst, hardLimits.__global__.ratePerSec),
-          types: new Map()
-        }
-      };
+      entry = { global: makeBucket(pairs.__global__, now), types: new Map() };
       tokens.set(token, entry);
     }
     return entry;
   }
 
-  function getTypeBucket(entry, tier, type) {
-    const tierLimits = (tier === 'hard') ? hardLimits : softLimits;
-    const limits = tierLimits[type] || tierLimits.message;
-    const map = entry[tier].types;
-    let bucket = map.get(type);
+  function getTypeBucket(entry, type, lim, now) {
+    let bucket = entry.types.get(type);
     if (!bucket) {
-      bucket = makeBucket(limits.burst, limits.ratePerSec);
-      map.set(type, bucket);
+      bucket = makeBucket(lim, now);
+      entry.types.set(type, bucket);
     }
     return bucket;
   }
@@ -162,22 +161,25 @@ function createRateLimiter(options) {
       };
     }
 
-    const entry = getOrCreate(token);
+    const entry = getOrCreate(token, now);
+    const globalLim = pairs.__global__;
+    const typeLim = limitsFor(type);
+    const global = entry.global;
+    const perType = getTypeBucket(entry, type, typeLim, now);
+    refill(global, globalLim, now);
+    refill(perType, typeLim, now);
 
-    const hardGlobal = tryConsume(entry.hard.global, now);
-    const hardType   = tryConsume(getTypeBucket(entry, 'hard', type), now);
-    if (!hardGlobal.ok || !hardType.ok) {
-      const which = !hardGlobal.ok ? 'global' : 'per_type';
-      const retry = Math.max(hardGlobal.retry_after_ms || 0, hardType.retry_after_ms || 0);
-      return { status: 'hard_limit', retry_after_ms: retry, limit_type: which };
+    // Las dos del corte se cobran siempre, aunque la primera falle (como antes).
+    const hardGlobal = take(global, 'h', globalLim.hard.ratePerSec);
+    const hardType   = take(perType, 'h', typeLim.hard.ratePerSec);
+    if (hardGlobal || hardType) {
+      return { status: 'hard_limit', retry_after_ms: Math.max(hardGlobal, hardType), limit_type: hardGlobal ? 'global' : 'per_type' };
     }
 
-    const softGlobal = tryConsume(entry.soft.global, now);
-    const softType   = tryConsume(getTypeBucket(entry, 'soft', type), now);
-    if (!softGlobal.ok || !softType.ok) {
-      const which = !softGlobal.ok ? 'global' : 'per_type';
-      const retry = Math.max(softGlobal.retry_after_ms || 0, softType.retry_after_ms || 0);
-      return { status: 'soft_limit', retry_after_ms: retry, limit_type: which };
+    const softGlobal = take(global, 's', globalLim.soft.ratePerSec);
+    const softType   = take(perType, 's', typeLim.soft.ratePerSec);
+    if (softGlobal || softType) {
+      return { status: 'soft_limit', retry_after_ms: Math.max(softGlobal, softType), limit_type: softGlobal ? 'global' : 'per_type' };
     }
 
     return { status: 'ok' };
