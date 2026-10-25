@@ -144,3 +144,69 @@ describe('verifyActaMembership', () => {
     }
   })
 })
+
+/**
+ * LA SEGUNDA BÓVEDA (multivault, `Mode: join` en Lambda). Sella con su llave, no con la del
+ * perfil, y lo que la ata al perfil es el eslabón que el acta lleva dentro. Las actas salen
+ * del pilar de verdad (`applyChanges` + `sealActa`): si el proxio y el pilar dejan de decir
+ * lo mismo sobre el eslabón, esto se rompe.
+ *
+ * El caso que lo trajo (2026-10-25): la bóveda en Lambda de Seyacat selló el acta #56, y el
+ * proxio dejó de atar el perfil a todo aparato que se identificara con ella, y no le dejó
+ * registrar su timbre (`not-a-member`).
+ */
+describe('verifyActaMembership: una segunda bóveda que sella', () => {
+  async function account () {
+    const { genesisActa, applyChanges, sealActa } = await import('@dotrino/identity/acta')
+    const seal = (a, k) => sealActa({ acta: a, privateJwk: k.privateJwk })
+    const A = await makeDeviceKey()   // la llave del perfil
+    const B = await makeDeviceKey()   // la segunda bóveda
+    const phone = await makeDeviceKey()
+    let acta = await seal(genesisActa({ pub: A.publickey, label: 'A' }), A)
+    acta = await seal(await applyChanges(acta, [
+      { op: 'admit', member: { pub: B.publickey, label: 'B', caps: ['sign', 'read', 'store', 'sealer'] } },
+      { op: 'admit', member: { pub: phone.publickey, label: 'tel', caps: ['sign'] } }
+    ], { by: A.publickey }), A)
+    const byB = await seal(await applyChanges(acta, [{ op: 'label', pub: phone.publickey, label: 'Teléfono' }], { by: B.publickey }), B)
+    return { A, B, phone, admitted: acta, byB, applyChanges, seal }
+  }
+
+  it('un acta sellada por la segunda bóveda ata el perfil', async () => {
+    const { A, B, phone, byB } = await account()
+    expect(byB.sealedBy).toBe(B.publickey)
+    expect(verifyActaMembership(byB, phone.publickey)).toBe(A.publickey)
+    expect(verifyActaMembership(byB, B.publickey)).toBe(A.publickey)
+  })
+
+  it('un eslabón tocado no vale', async () => {
+    const { phone, byB } = await account()
+    // Cambiar el eslabón rompe también la firma del acta; aquí se mira la del eslabón sola.
+    const link = { ...byB.sealerLink, sig: byB.sealerLink.sig.slice(0, -4) + 'AAAA' }
+    expect(verifyActaMembership({ ...byB, sealerLink: link }, phone.publickey)).toBe(null)
+  })
+
+  it('NO se secuestra un perfil con un eslabón suyo y una llave ajena', async () => {
+    const { A, phone, byB } = await account()
+    const attacker = await makeDeviceKey()
+    // El atacante tiene un eslabón auténtico de la víctima (son públicos) y se fabrica un
+    // acta con él, nombrándose sellador. El eslabón no lo nombra: no vale.
+    const body = {
+      ...byB, sealedBy: attacker.publickey,
+      members: [...byB.members, { pub: attacker.publickey, caps: ['sign', 'sealer'] }]
+    }
+    delete body.sig
+    const { signature } = await signWithDevice({ privateJwk: attacker.privateJwk, publickey: attacker.publickey, data: actaBody(body) })
+    expect(verifyActaMembership({ ...body, sig: signature }, attacker.publickey)).toBe(null)
+    expect(verifyActaMembership({ ...body, sig: signature }, phone.publickey)).toBe(null)
+    expect(A.publickey).not.toBe(attacker.publickey)
+  })
+
+  it('un eslabón firmado por otra selladora (dos saltos) no se acepta', async () => {
+    const { B, phone, byB, applyChanges, seal } = await account()
+    const C = await makeDeviceKey()
+    // B nombra a C selladora: el eslabón nuevo lo firma B, no la llave del perfil.
+    let acta = await seal(await applyChanges(byB, [{ op: 'admit', member: { pub: C.publickey, label: 'C', caps: ['sign', 'sealer'] } }], { by: B.publickey }), B)
+    expect(acta.sealerLink.by).toBe(B.publickey)
+    expect(verifyActaMembership(acta, phone.publickey)).toBe(null)
+  })
+})

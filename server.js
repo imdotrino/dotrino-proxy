@@ -1008,6 +1008,46 @@ function canSeal(acta, pub) {
 // la maestra, que no pasa por aquí — y justamente eso es lo que se quiere dejar de hacer.
 const ACTA_VERSIONS = [1, 2, 3, 4, 5];
 
+/** Quién puede sellar según el acta: la misma regla que `sealersOf` de @dotrino/identity. */
+function sealersOf(acta) {
+    const byCap = (acta.members || []).filter(m => m && canSeal(acta, m.pub)).map(m => m.pub);
+    if (acta.v <= 2 && acta.sealer && !byCap.includes(acta.sealer)) return [acta.sealer, ...byCap];
+    return byCap;
+}
+
+/**
+ * ¿LA LLAVE DEL PERFIL RESPALDA A QUIEN SELLÓ ESTA ACTA? Es el caso de la segunda bóveda
+ * (`Mode: join` en Lambda, `dotrino-vault/docs/replicas.md` §1.bis): el acta la sella su
+ * llave, no la del perfil.
+ *
+ * El acta lleva dentro el último eslabón de su cadena de selladoras (`sealerLink`, ver
+ * `checkSealerLink`/`verifySealerLink` de @dotrino/identity/acta). Si ese eslabón lo firmó la
+ * llave del perfil y nombra a quien selló, el ancla es la misma que antes: nadie fabrica ese
+ * eslabón sin la llave que da nombre al perfil. Lo que se comprueba, y es lo que el pilar
+ * comprueba:
+ *   1. el eslabón es del perfil del acta y lo firmó la llave del perfil;
+ *   2. su firma es buena;
+ *   3. dice lo mismo que el acta sobre quién sella, y es de esta acta o de una anterior;
+ *   4. quien selló está entre sus selladoras.
+ *
+ * Lo que no resuelve, igual que el pilar: la frescura. Un eslabón viejo sigue nombrando a una
+ * selladora retirada; quien tenga esa llave puede atarse este perfil hasta que el dueño la
+ * quite y el eslabón nuevo circule. Lo peor que consigue es enrutarse mensajes a sí mismo.
+ */
+function profileVouchesFor(acta) {
+    const l = acta.sealerLink;
+    if (!l || typeof l !== 'object' || l.v !== 1) return false;
+    if (l.profileId !== acta.profileId || l.by !== acta.profileId) return false;
+    if (typeof l.sig !== 'string' || !Number.isInteger(l.seq) || l.seq < 1) return false;
+    if (!Array.isArray(l.sealers) || !l.sealers.includes(acta.sealedBy)) return false;
+    if (acta.sealerChanged ? l.seq !== acta.seq : !(l.seq < acta.seq)) return false;
+    const says = [...l.sealers].sort().join('|');
+    if (says !== sealersOf(acta).sort().join('|')) return false;
+    let byJwk; try { byJwk = JSON.parse(l.by); } catch { return false; }
+    const { sig: _sig, ...body } = l;
+    return verifySignatureWithJWK(body, l.sig, byJwk);
+}
+
 function verifyActaMembership(acta, deviceJwkStr) {
     if (!acta || typeof acta !== 'object' || !ACTA_VERSIONS.includes(acta.v)) return null;
     const { profileId, sealer, sealedBy, members, sig } = acta;
@@ -1032,10 +1072,11 @@ function verifyActaMembership(acta, deviceJwkStr) {
     // recorrer eso, así que exige el único caso que se demuestra con lo que tiene delante:
     // que la haya sellado la llave del propio perfil.
     //
-    // Deja fuera al multivault (una segunda bóveda sellando la de otro), y es a propósito:
-    // atar mal el perfil de alguien es peor que no atarlo. Ese caso entra cuando se
-    // presente la cadena de eslabones, no antes.
-    if (sealedBy !== profileId) return null;
+    // O la segunda bóveda (multivault): la sella otra llave, y lo que la ata al perfil es el
+    // ESLABÓN que el acta lleva dentro, firmado por la llave del perfil y nombrándola
+    // selladora (`profileVouchesFor`). Un eslabón firmado por otra selladora (dos saltos)
+    // no se acepta: haría falta la cadena entera, y el proxio solo tiene esta acta.
+    if (sealedBy !== profileId && !profileVouchesFor(acta)) return null;
     // Y además el acta tiene que decir que esa llave puede sellar (permiso menos renuncias):
     // si el dueño se lo quitó, no vale ni siendo la del perfil.
     if (!canSeal(acta, sealedBy)) return null;
