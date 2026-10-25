@@ -2452,1119 +2452,6 @@ wss.on('connection', (ws, req) => {
         }
     });
     
-    // Funciones auxiliares para manejar mensajes especiales
-    function handlePublishMessage(ws, message) {
-        const channelData = message.channel;
-        
-        // Validar formato del canal
-        const validation = validateChannelFormat(channelData);
-        if (!validation.valid) {
-            const errorResponse = {
-                type: 'error',
-                code: validation.code, error: validation.error
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(errorResponse, message);
-            
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-        
-        const channelName = validation.channelName;
-
-        // Canal de otro nodo: la membresía la guarda su dueño, así que le
-        // mandamos la publicación con NUESTRA instancia (que es direccionable
-        // desde cualquier nodo, así que los demás miembros pueden escribirnos).
-        const home = channelOwnerOf(channelName);
-        if (!home.local) {
-            if (!home.known) {
-                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            forwardChannelOp(ws, message, home.owner, 'publish', { channel: channelName, instance: token });
-            const conn0 = activeConnections.get(token);
-            if (conn0) { conn0.channel = channelName; conn0.channelData = channelData; conn0.remoteChannelOwner = home.owner.pubkey; }
-            return;
-        }
-
-        // Actualizar canal del cliente
-        const conn = activeConnections.get(token);
-        if (conn) {
-            conn.channel = channelName;
-            conn.channelData = channelData; // Almacenar datos completos del canal
-        }
-
-        // Agregar a la lista pública del canal
-        addToPublicChannel(channelName, token);
-
-        // Notificar a los demás miembros del canal
-        const notifiedJoin = notifyChannelMembersOfJoin(token, channelName);
-
-        const response = {
-            type: 'published',
-            channel: channelName,
-            data: channelData.data,
-            timestamp: new Date().toISOString()
-        };
-
-        // Incluir ID del mensaje original si existe
-        applyMessageIds(response, message);
-
-        ws.send(JSON.stringify(response));
-
-        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} published in ${channelName} · notified ${notifiedJoin} member(s)`);
-    }
-    
-    function handleUnpublishMessage(ws, message) {
-        const channelData = message.channel;
-        
-        // Validar formato del canal
-        const validation = validateChannelFormat(channelData);
-        if (!validation.valid) {
-            const errorResponse = {
-                type: 'error',
-                code: validation.code, error: validation.error
-            };
-            
-            applyMessageIds(errorResponse, message);
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-        
-        const channelName = validation.channelName;
-
-        // Remover de la lista pública del canal
-        removeFromPublicChannel(channelName, token);
-
-        // Notificar a los miembros restantes del canal
-        const notifiedLeave = notifyChannelMembersOfLeave(token, channelName);
-
-        // Limpiar datos del canal en la conexión
-        const conn = activeConnections.get(token);
-        if (conn) {
-            conn.channel = null;
-            conn.channelData = null;
-        }
-
-        const response = {
-            type: 'unpublished',
-            channel: channelName,
-            timestamp: new Date().toISOString()
-        };
-
-        applyMessageIds(response, message);
-        ws.send(JSON.stringify(response));
-
-        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} unpublished from ${channelName} · notified ${notifiedLeave} member(s)`);
-    }
-    
-    function handleListMessage(ws, message) {
-        const channelData = message.channel;
-        
-        // Validar formato del canal
-        const validation = validateChannelFormat(channelData);
-        if (!validation.valid) {
-            const errorResponse = {
-                type: 'error',
-                code: validation.code, error: validation.error
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(errorResponse, message);
-            
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-        
-        const channelName = validation.channelName;
-
-        // ¿El canal es de otro nodo? La membresía la guarda su dueño.
-        const home = channelOwnerOf(channelName);
-        if (!home.local) {
-            if (!home.known) {
-                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            // El timbre de la bóveda vive donde ella lo registró, que puede ser este nodo.
-            for (const [pubkey, w] of wakesForChannel(channelName)) wakeVault(pubkey, w);
-            forwardChannelOp(ws, message, home.owner, 'list', { channel: channelName });
-            return;
-        }
-
-        // Obtener tokens del canal (ya filtrados por expiración)
-        const tokens = getChannelTokens(channelName);
-        // Vacío y con una bóveda que se despierta detrás: se la llama y se dice, para que quien
-        // lista espere unos segundos en vez de concluir que esa cuenta no existe.
-        const waking = tokens.length === 0 ? wakesForChannel(channelName) : [];
-        for (const [pubkey, w] of waking) wakeVault(pubkey, w);
-        
-        const response = {
-            type: 'channel_list',
-            channel: channelName,
-            tokens: tokens,
-            ...(waking.length ? { waking: true } : {}),
-            count: tokens.length,
-            maxEntries: MAX_CHANNEL_ENTRIES,
-            timestamp: new Date().toISOString()
-        };
-        
-        // Incluir ID del mensaje original si existe
-        applyMessageIds(response, message);
-        
-        ws.send(JSON.stringify(response));
-        
-        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} listed ${channelName}: ${tokens.length} token(s)`);
-    }
-
-    // Observar un canal (read-only): registra interés en sus eventos joined/left/
-    // disconnected SIN publicarse como miembro. Devuelve la lista actual de tokens
-    // para que el cliente tenga el estado inicial + luego los eventos en vivo.
-    function handleWatchMessage(ws, message) {
-        const validation = validateChannelFormat(message.channel);
-        if (!validation.valid) {
-            const e = { type: 'error', code: validation.code, error: validation.error };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-        }
-        const channelName = validation.channelName;
-        const home = channelOwnerOf(channelName);
-        if (!home.local) {
-            if (!home.known) {
-                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            // El registro de observadores lo lleva el dueño, igual que la
-            // membresía; los eventos vuelven por la malla (`chan-event`).
-            forwardChannelOp(ws, message, home.owner, 'watch', { channel: channelName, instance: token });
-            return;
-        }
-        let set = channelWatchers.get(channelName);
-        if (!set) { set = new Set(); channelWatchers.set(channelName, set); }
-        set.add(token);
-        const tokens = getChannelTokens(channelName);
-        const response = { type: 'watched', channel: channelName, tokens, count: tokens.length, timestamp: new Date().toISOString() };
-        applyMessageIds(response, message);
-        ws.send(JSON.stringify(response));
-        if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} watches ${channelName} (${tokens.length} token(s))`);
-    }
-
-    function handleUnwatchMessage(ws, message) {
-        const validation = validateChannelFormat(message.channel);
-        if (!validation.valid) {
-            const e = { type: 'error', code: validation.code, error: validation.error };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-        }
-        const channelName = validation.channelName;
-        const set = channelWatchers.get(channelName);
-        if (set) { set.delete(token); if (set.size === 0) channelWatchers.delete(channelName); }
-        const response = { type: 'unwatched', channel: channelName, timestamp: new Date().toISOString() };
-        applyMessageIds(response, message);
-        ws.send(JSON.stringify(response));
-    }
-
-    function handleListChannelsMessage(ws, message) {
-        const prefix = (typeof message.prefix === 'string') ? message.prefix : null;
-        const now = Date.now();
-        const channels = [];
-
-        for (const [name, entries] of publicChannels) {
-            if (prefix && !name.startsWith(prefix)) continue;
-            const validCount = entries.filter(e => now - e.publishedAt < CHANNEL_ENTRY_EXPIRY_MS).length;
-            if (validCount > 0) {
-                channels.push({ name, count: validCount });
-            }
-        }
-
-        const response = {
-            type: 'channels_list',
-            channels,
-            timestamp: new Date().toISOString()
-        };
-
-        if (prefix !== null) response.prefix = prefix;
-        applyMessageIds(response, message);
-        ws.send(JSON.stringify(response));
-    }
-
-    function handleChannelCountMessage(ws, message) {
-        const channelName = message.channel;
-
-        if (typeof channelName !== 'string' || channelName.length === 0) {
-            const errorResponse = {
-                type: 'error',
-                code: 'no-channel', error: 'channel is required (a non-empty string)'
-            };
-            applyMessageIds(errorResponse, message);
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-
-        const home = channelOwnerOf(channelName);
-        if (!home.local) {
-            if (!home.known) {
-                const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            forwardChannelOp(ws, message, home.owner, 'count', { channel: channelName });
-            return;
-        }
-
-        const tokens = getChannelTokens(channelName);
-
-        const response = {
-            type: 'channel_count',
-            channel: channelName,
-            count: tokens.length,
-            maxEntries: MAX_CHANNEL_ENTRIES,
-            timestamp: new Date().toISOString()
-        };
-
-        applyMessageIds(response, message);
-        ws.send(JSON.stringify(response));
-    }
-
-    function handleDisconnectMessage(ws, message) {
-        const targetToken = message.target;
-        
-        if (!targetToken || typeof targetToken !== 'string') {
-            const errorResponse = {
-                type: 'error',
-                error: 'Token destino requerido (string)'
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(errorResponse, message);
-            
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-        
-        // Verificar que el token destino no sea el mismo
-        if (targetToken === token) {
-            const errorResponse = {
-                type: 'error',
-                code: 'self-disconnect',
-                error: 'you cannot disconnect from yourself'
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(errorResponse, message);
-            
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-        
-        // Verificar que el token destino exista y esté conectado
-        const targetConn = activeConnections.get(targetToken);
-        if (!targetConn) {
-            const errorResponse = {
-                type: 'error',
-                code: 'unknown-token', error: `target token ${targetToken} not found or not connected`
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(errorResponse, message);
-            
-            ws.send(JSON.stringify(errorResponse));
-            return;
-        }
-        
-        // Remover el par de conexión y notificar a ambas partes
-        const result = removeConnectionPair(token, targetToken);
-        
-        if (result.success) {
-            // Enviar confirmación al cliente que solicitó la desconexión
-            const response = {
-                type: 'disconnect_confirmation',
-                target: targetToken,
-                timestamp: new Date().toISOString()
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(response, message);
-            
-            ws.send(JSON.stringify(response));
-            
-            if (process.env.NODE_ENV !== 'test') console.log(`[proxy] ${token} manually disconnected from ${targetToken}`);
-        } else {
-            const errorResponse = {
-                type: 'error',
-                code: result.code,
-                error: result.error
-            };
-            
-            // Incluir ID del mensaje original si existe
-            applyMessageIds(errorResponse, message);
-            
-            ws.send(JSON.stringify(errorResponse));
-        }
-    }
-    
-    // ----- identify y direccionamiento por pubkey -----------------------
-
-    /**
-     * ANUNCIAR LA LLAVE DE CIFRADO DE ESTA IDENTIDAD.
-     *
-     * Dos condiciones, y las dos hacen falta:
-     *   1. el anuncio va firmado por la pubkey de la que habla (eso lo ata a la identidad);
-     *   2. esta conexión YA se identificó como esa pubkey.
-     *
-     * La segunda no añade seguridad criptográfica —la firma ya lo dice todo— pero sí
-     * impide que un desconocido llene el directorio de anuncios de terceros que capturó
-     * por ahí. Anunciar es para uno mismo.
-     */
-    function handleEncPubMessage(ws, message) {
-        try {
-            const data = message.data;
-            const sig = message.signature;
-            const ownPubkey = tokenToPubkey.get(ws.token);
-            if (!ownPubkey) {
-                const e = { type: 'error', error: 'encpub: identificate primero (identify)' };
-                applyMessageIds(e, message);
-                ws.send(JSON.stringify(e));
-                return;
-            }
-            if (!data || data.publickey !== ownPubkey) {
-                const e = { type: 'error', code: 'encpub-not-yours', error: 'encpub: the announcement does not belong to the identity of this connection' };
-                applyMessageIds(e, message);
-                ws.send(JSON.stringify(e));
-                return;
-            }
-            if (!verifyEncPubStatement(data, sig)) {
-                const e = { type: 'error', code: 'encpub-invalid', error: 'encpub: invalid or badly signed announcement' };
-                applyMessageIds(e, message);
-                ws.send(JSON.stringify(e));
-                return;
-            }
-            const stored = storeEncPub(data, sig);
-            // Se reparte SOLO lo que cambió: reenviar lo repetido haría que dos nodos se
-            // devolvieran el mismo anuncio para siempre.
-            if (stored) {
-                try { mesh.broadcastEncPub({ data, signature: sig }); }
-                catch (e) { console.warn('[encpub] mesh broadcast failed:', e.message); }
-            }
-            const response = { type: 'encpub-announced', publickey: data.publickey, stored: stored };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleEncPubMessage error:', e);
-            try {
-                const err = { type: 'error', error: 'Error interno en encpub' };
-                applyMessageIds(err, message);
-                ws.send(JSON.stringify(err));
-            } catch (_) {}
-        }
-    }
-
-    /**
-     * PREGUNTAR POR LA LLAVE DE CIFRADO DE OTRO. Se devuelve el anuncio TAL CUAL lo firmó
-     * su dueño; el que pregunta lo verifica. Lo que no hay se dice en `missing`, para que
-     * quien llama distinga «no la tiene nadie» de «se cayó la red» — son problemas
-     * distintos: uno se arregla cuando el otro actualice, el otro esperando.
-     */
-    function handleEncLookupMessage(ws, message) {
-        try {
-            const requested = Array.isArray(message.publickeys)
-                ? message.publickeys
-                : (typeof message.publickeys === 'string' ? [message.publickeys] : null);
-            if (!requested || requested.length === 0) {
-                const e = { type: 'error', code: 'bad-input', error: 'enc-lookup: missing publickeys' };
-                applyMessageIds(e, message);
-                ws.send(JSON.stringify(e));
-                return;
-            }
-            if (requested.length > MAX_ENCPUB_LOOKUP) {
-                const e = { type: 'error', code: 'too-many-keys', error: `enc-lookup: too many keys (${requested.length}); the maximum is ${MAX_ENCPUB_LOOKUP}` };
-                applyMessageIds(e, message);
-                ws.send(JSON.stringify(e));
-                return;
-            }
-            const keys = [];
-            const missing = [];
-            for (const pk of requested) {
-                const entry = typeof pk === 'string' ? encPubs.get(pk) : null;
-                if (entry) keys.push({ data: entry.data, signature: entry.signature });
-                else missing.push(pk);
-            }
-            const response = { type: 'enc-lookup', keys, missing, timestamp: new Date().toISOString() };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleEncLookupMessage error:', e);
-            try {
-                const err = { type: 'error', error: 'Error interno en enc-lookup' };
-                applyMessageIds(err, message);
-                ws.send(JSON.stringify(err));
-            } catch (_) {}
-        }
-    }
-
-    async function handleIdentifyMessage(ws, message) {
-        try {
-            const data = message.data;
-            const sig  = message.signature;
-            if (!data || !sig || data.op !== 'identify' || !data.publickey || !data.token || !data.ts) {
-                const errorResponse = {
-                    type: 'error',
-                    code: 'bad-format', error: 'invalid identify format (expected data:{op:"identify",publickey,token,ts}+signature)'
-                };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-                return;
-            }
-            const skew = Math.abs(Date.now() - Number(data.ts));
-            if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-                const errorResponse = { type: 'error', code: 'stale', error: 'identify ts outside the ±5 min window' };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-                return;
-            }
-            if (data.token !== ws.token) {
-                const errorResponse = { type: 'error', code: 'token-mismatch', error: 'identify.token does not match this connection' };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-                return;
-            }
-            // ¿VIENE DIRIGIDO A MÍ? (ver PROXY_AUDIENCE, arriba). Mientras dure la migración
-            // se cuenta y se dice; con `PROXY_AUDIENCE_ENFORCE=1` se rechaza.
-            const audOk = PROXY_AUDIENCE && typeof data.aud === 'string' &&
-                data.aud.replace(/\/+$/, '') === PROXY_AUDIENCE;
-            if (!audOk) {
-                if (PROXY_AUDIENCE_ENFORCE) {
-                    const errorResponse = { type: 'error', code: 'wrong-audience', error: 'identify without an audience, or addressed to another proxy' };
-                    applyMessageIds(errorResponse, message);
-                    ws.send(JSON.stringify(errorResponse));
-                    return;
-                }
-                const n = (identifyWithoutAudience.get(data.publickey) || 0) + 1;
-                identifyWithoutAudience.set(data.publickey, n);
-                // Una línea por llave, no una por identify: reconectar es normal y no hace
-                // falta repetirlo. Lo que se quiere saber es QUIÉN falta por actualizar.
-                if (n === 1) {
-                    console.warn(`[proxy] identify without an audience (aud) from ${String(data.publickey).slice(0, 60)}… — client needs @dotrino/proxy-client >= 0.18`);
-                }
-            }
-            let pubKeyJwk;
-            try { pubKeyJwk = JSON.parse(data.publickey); }
-            catch (_) {
-                const errorResponse = { type: 'error', code: 'bad-publickey', error: 'identify.publickey must be a serialized JWK' };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-                return;
-            }
-            const ok = verifySignatureWithJWK(data, sig, pubKeyJwk);
-            if (!ok) {
-                const errorResponse = { type: 'error', code: 'bad-signature', error: 'invalid identify signature' };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-                return;
-            }
-            // Si este token estaba bound a OTRA pubkey, lo soltamos primero.
-            const prevPub = tokenToPubkey.get(ws.token);
-            if (prevPub && prevPub !== data.publickey) {
-                const oldSet = pubkeyToTokens.get(prevPub);
-                if (oldSet) {
-                    oldSet.delete(ws.token);
-                    if (oldSet.size === 0) pubkeyToTokens.delete(prevPub);
-                }
-            }
-            // Una pubkey puede estar simultáneamente en varios tokens: añadimos
-            // a la set en lugar de reemplazar. Solo el primero drena la cola
-            // offline; las siguientes instancias no reciben nada antiguo.
-            const wasFirstInstance =
-                !pubkeyToTokens.has(data.publickey) ||
-                pubkeyToTokens.get(data.publickey).size === 0;
-            bindPubkey(data.publickey, ws.token);
-            // QUÉ APP ES (fuera de lo firmado: es ruteo, y quien tiene la llave ya puede leerlo
-            // todo). Con app, baja SU parte de la cola aunque la llave ya estuviera conectada en
-            // otra app del mismo aparato; sin app, como siempre: solo la primera instancia.
-            const connApp = appOf(message.app);
-            const selfConn = activeConnections.get(ws.token);
-            if (selfConn) selfConn.app = connApp;
-            // Federación: este proxy queda registrado como "home" de esta pubkey
-            // (persistente con TTL), para encolar sus mensajes federados offline.
-            registerHome(data.publickey);
-
-            // "Una identidad": si el cliente presenta un CERT que delega ESTA pubkey D desde
-            // una maestra M, registramos el token TAMBIÉN bajo M → los mensajes a M llegan a
-            // este dispositivo (sin la privada de M). Aditivo: sin cert, idéntico a antes.
-            unbindExtraPubkeys(ws.token);
-            let masterDelivered = 0;
-            let masterBound = null;
-            const master = verifyDeviceCert(message.cert, data.publickey);
-            if (master && master !== data.publickey) {
-                const masterWasFirst = !pubkeyToTokens.has(master) || pubkeyToTokens.get(master).size === 0;
-                bindExtraPubkey(master, ws.token);
-                registerHome(master);
-                masterBound = master;
-                if (masterWasFirst || connApp) masterDelivered = await flushOfflineFor(master, ws, connApp);
-            }
-
-            // Acta de perfil: bindea también el `profileId` (la PERSONA), de modo que un
-            // mensaje dirigido a ella llegue a cualquiera de sus dispositivos conectados.
-            let profileBound = null;
-            let profileDelivered = 0;
-            const profileId = verifyActaMembership(message.acta, data.publickey);
-            if (profileId && profileId !== data.publickey && profileId !== masterBound) {
-                const profileWasFirst = !pubkeyToTokens.has(profileId) || pubkeyToTokens.get(profileId).size === 0;
-                bindExtraPubkey(profileId, ws.token);
-                registerHome(profileId);
-                profileBound = profileId;
-                if (profileWasFirst || connApp) profileDelivered = await flushOfflineFor(profileId, ws, connApp);
-            } else if (profileId) {
-                profileBound = profileId;
-            }
-
-            const delivered = (wasFirstInstance || connApp) ? await flushOfflineFor(data.publickey, ws, connApp) : 0;
-            const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered + profileDelivered, master: masterBound, profile: profileBound };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleIdentifyMessage error:', e);
-            try {
-                const errorResponse = { type: 'error', error: 'Error interno en identify' };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-            } catch (_) {}
-        }
-    }
-
-    // Registrar/actualizar la push subscription de una pubkey. El sobre va
-    // firmado por el vault (misma verificación que identify): la firma prueba
-    // que quien envía la subscription es dueño de esa pubkey.
-    //   data: { op:'push-subscribe', publickey, subscription, ts }
-    function handlePushSubscribeMessage(ws, message) {
-        try {
-            const data = message.data;
-            const sig  = message.signature;
-            if (!data || !sig || data.op !== 'push-subscribe' || !data.publickey || !data.subscription || !data.ts) {
-                const e = { type: 'error', code: 'bad-format', error: 'invalid push-subscribe format (expected data:{op:"push-subscribe",publickey,subscription,ts}+signature)' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            const skew = Math.abs(Date.now() - Number(data.ts));
-            if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-                const e = { type: 'error', code: 'stale', error: 'push-subscribe ts outside the ±5 min window' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            let pubKeyJwk;
-            try { pubKeyJwk = JSON.parse(data.publickey); }
-            catch (_) {
-                const e = { type: 'error', code: 'bad-publickey', error: 'push-subscribe.publickey must be a serialized JWK' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
-                const e = { type: 'error', code: 'bad-signature', error: 'invalid push-subscribe signature' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            // La subscription viaja como string JSON (sobre plano => firma canónica
-            // idéntica entre cliente/vault/servidor). La parseamos para guardarla.
-            let subscription = data.subscription;
-            if (typeof subscription === 'string') {
-                try { subscription = JSON.parse(subscription); }
-                catch (_) {
-                    const e = { type: 'error', code: 'bad-subscription', error: 'push-subscribe.subscription is not valid JSON' };
-                    applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-                }
-            }
-            // Dos formas: la PushSubscription del navegador (endpoint + keys) o el token de
-            // la app nativa (`{ kind:'fcm', token }` en Android, `{ kind:'apns', token, topic, env }`
-            // en iOS). Cualquier otra cosa no es una suscripción.
-            // EL TIMBRE DE UNA BÓVEDA QUE NO VIVE CONECTADA (`{ kind:'wake', url }`): lo firma su
-            // llave de comunicación y el acta prueba que es de la cuenta, así que se guarda para
-            // la CUENTA, que es a quien le escriben los servicios. Sin acta válida no hay timbre.
-            const wake = parseWakeSubscription(subscription);
-            if (wake) {
-                const profileId = verifyActaMembership(message.acta, data.publickey);
-                if (!profileId) {
-                    const e = { type: 'error', code: 'not-a-member', error: 'push-subscribe (wake): the record does not name this key' };
-                    applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-                }
-                // Con `self` se guarda para quien firma (un miembro de esa cuenta); sin él, para
-                // la cuenta. Las dos plazas son distintas: una réplica no le quita la suya a la bóveda.
-                const owner = wake.self ? data.publickey : profileId;
-                setPushSubscription(owner, WAKE_APP, wake);
-                registerHome(owner);
-                const response = { type: 'push-subscribed', publickey: owner, app: WAKE_APP };
-                applyMessageIds(response, message);
-                ws.send(JSON.stringify(response));
-                return;
-            }
-            const isWeb = subscription && typeof subscription.endpoint === 'string';
-            const isFcm = subscription && subscription.kind === 'fcm' && typeof subscription.token === 'string' && subscription.token.length > 20 && subscription.token.length < 4096;
-            const apns = parseApnsSubscription(subscription);
-            if (!isWeb && !isFcm && !apns) {
-                const e = { type: 'error', error: 'push-subscribe.subscription: expected a PushSubscription, { kind:"fcm", token } or { kind:"apns", token, topic, env }' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            if (isFcm) subscription = { kind: 'fcm', token: subscription.token };
-            if (apns) subscription = apns;
-            // `data.app` va DENTRO de lo firmado: dice qué app de este aparato recibe el timbre.
-            const subApp = appOf(data.app);
-            setPushSubscription(data.publickey, subApp, subscription);
-            const response = { type: 'push-subscribed', publickey: data.publickey, app: subApp };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handlePushSubscribeMessage error:', e);
-        }
-    }
-
-    // UN RECEPTOR DICE QUÉ LLAVES LE QUEDAN, y se quitan sus demás suscripciones.
-    //   { type:'push-prune', target, app?, keep:[publickey…] }
-    //
-    // Es la baja de una cuenta que el aparato YA NO TIENE: la quitó, y con ella la llave con
-    // la que firmaría un `push-unsubscribe`. Sin esto el teléfono seguía sonando con los
-    // pedidos de una cuenta borrada (dueño, 2026-10-12).
-    //
-    // No va firmado, y no puede: no queda llave. Lo que autoriza es conocer el `target` (el
-    // token de APNs/FCM o el endpoint de Web Push), que solo tienen ese aparato y este proxio.
-    // Y lo único que se consigue con él es dejar de timbrar a ESE receptor.
-    function handlePushPruneMessage(ws, message) {
-        try {
-            const { target, keep } = message;
-            if (typeof target !== 'string' || !target || !Array.isArray(keep) || keep.some((k) => typeof k !== 'string')) {
-                const e = { type: 'error', code: 'bad-format', error: 'invalid push-prune format (expected target:string, keep:[publickey…], app?)' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            const removed = prunePushSubscriptions(target, message.app === undefined ? undefined : appOf(message.app), new Set(keep));
-            const response = { type: 'push-pruned', removed };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handlePushPruneMessage error:', e);
-            const err = { type: 'error', error: 'internal error in push-prune' };
-            applyMessageIds(err, message);
-            try { ws.send(JSON.stringify(err)); } catch (_) {}
-        }
-    }
-
-    // Borrar la push subscription de una pubkey (la PWA desactiva notifs).
-    //   data: { op:'push-unsubscribe', publickey, ts }
-    function handlePushUnsubscribeMessage(ws, message) {
-        try {
-            const data = message.data;
-            const sig  = message.signature;
-            if (!data || !sig || data.op !== 'push-unsubscribe' || !data.publickey || !data.ts) {
-                const e = { type: 'error', code: 'bad-format', error: 'invalid push-unsubscribe format' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            const skew = Math.abs(Date.now() - Number(data.ts));
-            if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-                const e = { type: 'error', code: 'stale', error: 'push-unsubscribe ts outside the ±5 min window' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            let pubKeyJwk;
-            try { pubKeyJwk = JSON.parse(data.publickey); }
-            catch (_) {
-                const e = { type: 'error', code: 'bad-publickey', error: 'push-unsubscribe.publickey must be a serialized JWK' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
-                const e = { type: 'error', code: 'bad-signature', error: 'invalid push-unsubscribe signature' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            // Con `app`, solo la de esa app; sin ella (cliente viejo), todas las de la llave.
-            removePushSubscription(data.publickey, data.app === undefined ? undefined : appOf(data.app));
-            const response = { type: 'push-unsubscribed', publickey: data.publickey };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handlePushUnsubscribeMessage error:', e);
-        }
-    }
-
-    // Helper: valida sobre firmado por el vault y devuelve la pubkey (o null).
-    // Self-only: el target SIEMPRE es data.publickey (quien firma).
-    function verifySignedOp(ws, message, op) {
-        const data = message.data;
-        const sig  = message.signature;
-        if (!data || !sig || data.op !== op || !data.publickey || !data.ts) {
-            const e = { type: 'error', code: 'bad-format', error: `invalid ${op} format` };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
-        }
-        const skew = Math.abs(Date.now() - Number(data.ts));
-        if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
-            const e = { type: 'error', code: 'stale', error: `${op} ts outside the ±5 min window` };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
-        }
-        let jwk;
-        try { jwk = JSON.parse(data.publickey); }
-        catch (_) {
-            const e = { type: 'error', code: 'bad-publickey', error: `${op}.publickey must be a serialized JWK` };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
-        }
-        if (!verifySignatureWithJWK(data, sig, jwk)) {
-            const e = { type: 'error', code: 'bad-signature', error: `invalid ${op} signature` };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
-        }
-        return data;
-    }
-
-    // Credenciales TURN temporales (Cloudflare) para WebRTC. Solo para
-    // conexiones YA identificadas con esa misma pubkey: la firma del sobre
-    // prueba la identidad, y el bind pubkey↔token evita re-jugar un sobre
-    // ajeno desde otro socket. El TTL corto + cuota por pubkey/hora evitan
-    // que las credenciales se farmeen para tráfico ajeno al ecosistema.
-    //   data: { op:'turn-credentials', publickey, ts }
-    async function handleTurnCredentialsMessage(ws, message) {
-        try {
-            const data = verifySignedOp(ws, message, 'turn-credentials');
-            if (!data) return;
-            const boundPubkey = tokenToPubkey.get(ws.token);
-            if (boundPubkey !== data.publickey) {
-                const e = { type: 'error', code: 'not-identified', error: 'turn-credentials requires a prior identify with that pubkey' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            if (!turnIssuer.enabled) {
-                const response = { type: 'turn-credentials', enabled: false };
-                applyMessageIds(response, message);
-                ws.send(JSON.stringify(response));
-                return;
-            }
-            const result = await turnIssuer.issue(data.publickey);
-            if (result.limited) {
-                const why = {
-                    'turn-daily-cap': 'turn-credentials: daily traffic cap reached',
-                    'turn-usage-unknown': 'turn-credentials: usage cannot be read, not issuing',
-                    'turn-quota': 'turn-credentials: hourly quota reached'
-                };
-                // 429: «ahora no». El cliente sigue por el proxio y vuelve a pedir pasado
-                // `retry_after_ms` (proxy-client ≥ 0.32.0).
-                const e = {
-                    type: 'error',
-                    status: 429,
-                    code: result.reason,
-                    error: why[result.reason],
-                    retry_after_ms: result.retry_after_ms
-                };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            const response = {
-                type: 'turn-credentials',
-                enabled: true,
-                iceServers: result.iceServers,
-                expiresAt: result.expiresAt,
-                ttl: result.ttl
-            };
-            applyMessageIds(response, message);
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleTurnCredentialsMessage error:', e.message);
-            try {
-                const errorResponse = { type: 'error', error: 'turn-credentials: error emitiendo credenciales' };
-                applyMessageIds(errorResponse, message);
-                ws.send(JSON.stringify(errorResponse));
-            } catch (_) {}
-        }
-    }
-
-    // Programar un push a la PROPIA pubkey. data.spec = JSON string con
-    // { fireAt?:ms (one-shot) | cron?:string + tz?:string, payload?:object }.
-    function handleSchedulePushMessage(ws, message) {
-        try {
-            const data = verifySignedOp(ws, message, 'schedule-push');
-            if (!data) return;
-            let spec;
-            try { spec = JSON.parse(data.spec); }
-            catch (_) {
-                const e = { type: 'error', code: 'bad-spec', error: 'schedule-push.spec is not valid JSON' };
-                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-            }
-            let nextFire;
-            const cron = spec.cron || null;
-            const tz = spec.tz || null;
-            if (cron) {
-                nextFire = cronNextFire(cron, tz, Date.now());
-                if (!nextFire) {
-                    const e = { type: 'error', code: 'bad-cron', error: 'invalid cron' };
-                    applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-                }
-            } else {
-                nextFire = Number(spec.fireAt);
-                if (!Number.isFinite(nextFire) || nextFire <= Date.now()) {
-                    const e = { type: 'error', code: 'bad-fireat', error: 'fireAt must be a future timestamp (ms)' };
-                    applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-                }
-            }
-            const payload = spec.payload ? JSON.stringify(spec.payload) : null;
-            // `data.app` va DENTRO de lo firmado, como en push-subscribe: el timbre es dirigido.
-            const jobId = persist.insertScheduledPush({ pubkey: data.publickey, app: appOf(data.app), payload, nextFire, cron, tz });
-            const response = { type: 'push-scheduled', jobId, nextFire };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleSchedulePushMessage error:', e);
-        }
-    }
-
-    // Cancelar un job propio. data.jobId.
-    function handleCancelPushMessage(ws, message) {
-        try {
-            const data = verifySignedOp(ws, message, 'cancel-push');
-            if (!data) return;
-            const jobId = Number(data.jobId);
-            const job = persist.getScheduledPush(jobId);
-            // Self-only: solo podés cancelar tus propios jobs.
-            if (job && job.pubkey === data.publickey) persist.deleteScheduledPush(jobId);
-            const response = { type: 'push-canceled', jobId };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleCancelPushMessage error:', e);
-        }
-    }
-
-    // Listar los jobs propios.
-    function handleListPushesMessage(ws, message) {
-        try {
-            const data = verifySignedOp(ws, message, 'list-pushes');
-            if (!data) return;
-            const rows = persist.listScheduledPushesForPubkey(data.publickey);
-            const jobs = rows.map(r => ({
-                jobId: r.id,
-                app: r.app || null,
-                nextFire: r.next_fire,
-                cron: r.cron || null,
-                tz: r.tz || null,
-                payload: r.payload ? JSON.parse(r.payload) : null
-            }));
-            const response = { type: 'push-list', jobs };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-        } catch (e) {
-            console.error('handleListPushesMessage error:', e);
-        }
-    }
-
-    // ----- citas de emparejamiento (el código corto que ve un humano) -----
-
-    /** Emite (o renueva) la cita de ESTA conexión. */
-    function handlePairCodeMessage(ws, message) {
-        if (!nodeIdentity) {
-            const e = { type: 'error', code: 'no-node-identity', error: 'this node cannot issue codes (it has no node identity)' };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-        }
-        const res = pairingCodes.create({
-            instance: ws.token,
-            pubkey: tokenToPubkey.get(ws.token) || null,
-            hint: nodeIdentity.hint,
-            ttlMs: message.ttlMs
-        });
-        if (!res) {
-            const e = { type: 'error', code: 'code-failed', error: 'could not issue the code' };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-        }
-        const response = { type: 'pair-code', code: res.code, expiresAt: res.expiresAt, node: nodeIdentity.nodeId };
-        applyMessageIds(response, message);
-        ws.send(JSON.stringify(response));
-    }
-
-    /**
-     * Canjea una cita y devuelve a quién apunta.
-     *
-     * Los 2 primeros caracteres del código son un FILTRO —los dos primeros del id
-     * del nodo que lo emitió—, no un reclamo exclusivo: puede haber más de un
-     * candidato. Se les pregunta a TODOS los que coincidan (en la práctica, uno)
-     * y se exige que conteste que sí EXACTAMENTE UNO.
-     *
-     * Nunca se elige "el primero que conteste": ahí es donde un nodo hostil se
-     * cuela a quedarse con emparejamientos ajenos. Si contestan dos, se rechaza y
-     * se pide otro código — molesta, pero no entrega a nadie con quien no era.
-     * Y como el filtro sale del id DERIVADO de la llave, un nodo no puede siquiera
-     * figurar como candidato de un código que no le corresponde.
-     */
-    function handlePairRedeemMessage(ws, message) {
-        const raw = message.code;
-        const code = require('./pairingCodes').normalizeCode(raw);
-        // Se valida la FORMA antes de mover nada por la malla: un código con
-        // símbolos que este ecosistema no emite no puede existir en ningún nodo,
-        // así que preguntarlo sería tráfico s2s regalado a quien mande basura.
-        if (!code || code.length !== nodeIdentityLib.CODE_HINT_LEN + 4 || !require('./alphabet').isEmittable(code)) {
-            const e = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid code' };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-        }
-        const hint = code.slice(0, nodeIdentityLib.CODE_HINT_LEN);
-
-        const remotes = nodeIdentity ? peerRegistry.candidatesByHint(hint) : [];
-        const isCandidate = !nodeIdentity || hint === nodeIdentity.hint;
-
-        // Caso común y barato: solo yo puedo tenerlo.
-        if (isCandidate && remotes.length === 0) {
-            const r = pairingCodes.redeem(code);
-            const response = r.error
-                ? { type: 'pair-redeem', ok: false, code: r.code, error: r.error }
-                : { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
-            applyMessageIds(response, message);
-            ws.send(JSON.stringify(response));
-            return;
-        }
-        if (!isCandidate && remotes.length === 0) {
-            const e = { type: 'pair-redeem', ok: false, code: 'unknown-code-node', error: 'no known node can hold that code' };
-            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
-        }
-
-        // Hay varios candidatos (o uno remoto): se pregunta a todos y se espera.
-        const rid = `r${++redeemSeq}`;
-        const local = isCandidate ? pairingCodes.redeem(code) : null;
-        const pending = {
-            ws, message,
-            expected: remotes.length,
-            replies: local && !local.error ? [{ instance: local.instance, pubkey: local.pubkey }] : [],
-            received: 0,
-            timer: null
-        };
-        const resolve = () => {
-            if (!pendingRedeems.has(rid)) return;
-            pendingRedeems.delete(rid);
-            clearTimeout(pending.timer);
-            let response;
-            if (pending.replies.length === 1) {
-                const r = pending.replies[0];
-                response = { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
-            } else if (pending.replies.length > 1) {
-                // Colisión real o un nodo mintiendo. En los dos casos la respuesta
-                // correcta es la misma: no adivinar.
-                response = { type: 'pair-redeem', ok: false, code: 'ambiguous-code', error: 'ambiguous code: ask for a new one' };
-                console.warn(`[pair] ambiguous code (${pending.replies.length} nodes claim it) — filter ${hint}`);
-            } else {
-                response = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid or already used code' };
-            }
-            applyMessageIds(response, pending.message);
-            try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
-        };
-        pending.resolve = resolve;
-        pending.timer = setTimeout(resolve, 6000);
-        if (pending.timer.unref) pending.timer.unref();
-        pendingRedeems.set(rid, pending);
-
-        let sentCount = 0;
-        for (const peer of remotes) {
-            if (mesh.sendTo(peer.pubkey, 'pair-redeem', { rid, code }, { retain: false })) sentCount++;
-        }
-        pending.expected = sentCount;
-        // Si ningún candidato remoto era alcanzable, se resuelve ya con lo local.
-        if (sentCount === 0) resolve();
-    }
-
-    async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
-        const senderPubkey = tokenToPubkey.get(ws.token) || null;
-        const now = Date.now();
-        // Mensaje EFÍMERO: si el destinatario no está ahora, no vale la pena
-        // guardarlo. La cola offline entrega hasta 24 h después, que es correcto
-        // para un mensaje de chat y veneno para el tráfico de tiempo real: una
-        // jugada de ajedrez o una oferta SDP entregadas mañana no solo son
-        // inútiles, reinician negociaciones imposibles y muestran movimientos
-        // fuera de contexto. Lo marca quien envía, que es el único que sabe si su
-        // payload caduca.
-        const ephemeral = message.ephemeral === true;
-        // Mensaje CALLADO: se encola igual, pero no se toca el timbre push. Lo marca quien
-        // envía para lo que puede esperar a que la otra punta abra sola (un aviso de que
-        // algo cambió). Sin esto, cada aviso de la bóveda hacía sonar el teléfono con
-        // «alguien pide tus claves», y al abrir no había ningún pedido.
-        const quiet = message.quiet === true;
-        // A QUÉ APP va (ruteo, ver `appOf`). Sin app: a todas las de esa llave.
-        const app = appOf(message.app);
-        const expiresAt = now + OFFLINE_TTL_MS;
-        const sentInline = [];
-        const queued = [];
-        const dropped = [];
-        const failed = [];
-        // Por qué no se pudo encolar (p. ej. `queue-unavailable`): sin esto, «no está y no
-        // se pudo guardar» se veía igual que un destinatario inválido.
-        let queueError = null;
-        let totalDeliveries = 0;
-        const queueFor = async (pk) => {
-            try {
-                await enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes: bytesOfMessage(message.message), app });
-            } catch (e) {
-                console.error(`[queue] message for an offline recipient could not be queued (${e.code || 'error'}): ${e.message}`);
-                queueError = e.code || 'queue-unavailable';
-                failed.push(pk);
-                return;
-            }
-            queued.push(pk);
-            // Timbre push (sin contenido): despierta a la app destinataria
-            // para que reconecte y baje su cola. Best-effort.
-            if (!quiet) ringPush(pk, app, ringHint(message.message));
-        };
-        for (const pk of targetPubkeys) {
-            if (!pk || typeof pk !== 'string') { failed.push(pk); continue; }
-            // Self?
-            if (senderPubkey && pk === senderPubkey) { failed.push(pk); continue; }
-            const targetTokens = pubkeyToTokens.get(pk);  // Set or undefined
-            // Filtrar tokens cuyo ws siga vivo (no debería haber zombies, pero por si acaso).
-            const liveConns = [];
-            if (targetTokens) {
-                for (const t of targetTokens) {
-                    const conn = activeConnections.get(t);
-                    // Solo las conexiones de ESA app (o las que no dijeron cuál): si la app
-                    // destino no está abierta, el mensaje se encola para ella aunque otra app
-                    // del mismo aparato esté conectada.
-                    if (conn && appMatches(conn.app, app)) liveConns.push({ token: t, conn });
-                }
-            }
-            if (liveConns.length > 0) {
-                let anySent = false;
-                // Fan-out: una entrega por cada instancia activa de la pubkey.
-                for (const { token: targetToken, conn } of liveConns) {
-                    try {
-                        wireBody.sendMessage(conn.ws, { type: 'message', from: ws.token, from_publickey: senderPubkey }, message.message);
-                        connectionPairs.add(createPairKey(ws.token, targetToken));
-                        anySent = true;
-                        totalDeliveries++;
-                    } catch (_) { /* skip esa instancia, intenta las demás */ }
-                }
-                if (anySent) {
-                    sentInline.push(pk);
-                    // EL TIMBRE SUENA SIEMPRE, también cuando se entrega en vivo, y la app
-                    // decide qué hace con él (dueño, 2026-10-16). Una conexión que el proxio
-                    // cree viva puede estar muerta: un teléfono que pasó a segundo plano tarda
-                    // hasta un minuto en caer por el latido, y lo que se le entrega ahí no lo
-                    // ve nadie — así no llegó un pedido de aprobación hasta cerrar y abrir la
-                    // app. Adivinar aquí si la app «está» es justo lo que fallaba. Solo no
-                    // suenan los callados (los marca quien envía) y los efímeros (tiempo real:
-                    // tarde no sirven).
-                    if (!quiet && !ephemeral) ringPush(pk, app, ringHint(message.message));
-                } else failed.push(pk);
-            } else if (PROXY_PEERS.length) {
-                // Federación: no hay instancias locales → reenviar a la malla (un
-                // peer puede tener al destinatario online, o ser su home y encolar).
-                // ADEMÁS encolamos local como FALLBACK para no perder el mensaje si
-                // el home aún no se conoce (la app dedup por `mid`). El receptor
-                // federado, en cambio, solo encola si es home (evita acumular en
-                // proxies intermedios).
-                forwardToPeers(pk, message.message, senderPubkey, now, expiresAt, ephemeral, quiet, app);
-                if (ephemeral) {
-                    // Se intenta la entrega en vivo por la malla, pero no se guarda
-                    // nada: si el destinatario no está, se perdió y punto.
-                    dropped.push(pk);
-                } else {
-                    await queueFor(pk);
-                }
-            } else if (ephemeral) {
-                // Sin federación y sin destinatario local: no hay a quién entregar.
-                dropped.push(pk);
-            } else {
-                // Sin federación: comportamiento actual (cola offline 24h single-drain).
-                await queueFor(pk);
-            }
-        }
-        if (queued.length || failed.length || dropped.length) {
-            const response = {
-                type: 'message_sent',
-                sent: sentInline.length,
-                deliveries: totalDeliveries,  // entregas reales tras fan-out
-                queued: queued,
-                failed: failed
-            };
-            // `dropped` solo aparece con mensajes efímeros: dice "no se guardó",
-            // que para la app NO es lo mismo que "falló" ni que "quedó encolado".
-            if (dropped.length) response.dropped = dropped;
-            if (queueError) response.code = queueError;
-            applyMessageIds(response, message);
-            try { ws.send(JSON.stringify(response)); } catch (_) {}
-        }
-    }
 
     // Manejar cierre de conexión
     ws.on('close', () => {
@@ -3615,6 +2502,1132 @@ wss.on('connection', (ws, req) => {
     });
 });
 
+
+// Las funciones que atienden cada tipo de mensaje viven aquí, FUERA de la conexión.
+// Antes se creaban de nuevo con cada socket (22 funciones y su contexto, ~1,5 KB por
+// bóveda conectada; medido el 2026-10-25), aunque son siempre las mismas. Reciben el
+// `ws` de la conexión y leen de ahí su token: `ws.token` se asigna una vez al conectar
+// y no cambia.
+function handlePublishMessage(ws, message) {
+    const token = ws.token;
+    const channelData = message.channel;
+    
+    // Validar formato del canal
+    const validation = validateChannelFormat(channelData);
+    if (!validation.valid) {
+        const errorResponse = {
+            type: 'error',
+            code: validation.code, error: validation.error
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(errorResponse, message);
+        
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+    
+    const channelName = validation.channelName;
+
+    // Canal de otro nodo: la membresía la guarda su dueño, así que le
+    // mandamos la publicación con NUESTRA instancia (que es direccionable
+    // desde cualquier nodo, así que los demás miembros pueden escribirnos).
+    const home = channelOwnerOf(channelName);
+    if (!home.local) {
+        if (!home.known) {
+            const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        forwardChannelOp(ws, message, home.owner, 'publish', { channel: channelName, instance: token });
+        const conn0 = activeConnections.get(token);
+        if (conn0) { conn0.channel = channelName; conn0.channelData = channelData; conn0.remoteChannelOwner = home.owner.pubkey; }
+        return;
+    }
+
+    // Actualizar canal del cliente
+    const conn = activeConnections.get(token);
+    if (conn) {
+        conn.channel = channelName;
+        conn.channelData = channelData; // Almacenar datos completos del canal
+    }
+
+    // Agregar a la lista pública del canal
+    addToPublicChannel(channelName, token);
+
+    // Notificar a los demás miembros del canal
+    const notifiedJoin = notifyChannelMembersOfJoin(token, channelName);
+
+    const response = {
+        type: 'published',
+        channel: channelName,
+        data: channelData.data,
+        timestamp: new Date().toISOString()
+    };
+
+    // Incluir ID del mensaje original si existe
+    applyMessageIds(response, message);
+
+    ws.send(JSON.stringify(response));
+
+    if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} published in ${channelName} · notified ${notifiedJoin} member(s)`);
+}
+
+function handleUnpublishMessage(ws, message) {
+    const token = ws.token;
+    const channelData = message.channel;
+    
+    // Validar formato del canal
+    const validation = validateChannelFormat(channelData);
+    if (!validation.valid) {
+        const errorResponse = {
+            type: 'error',
+            code: validation.code, error: validation.error
+        };
+        
+        applyMessageIds(errorResponse, message);
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+    
+    const channelName = validation.channelName;
+
+    // Remover de la lista pública del canal
+    removeFromPublicChannel(channelName, token);
+
+    // Notificar a los miembros restantes del canal
+    const notifiedLeave = notifyChannelMembersOfLeave(token, channelName);
+
+    // Limpiar datos del canal en la conexión
+    const conn = activeConnections.get(token);
+    if (conn) {
+        conn.channel = null;
+        conn.channelData = null;
+    }
+
+    const response = {
+        type: 'unpublished',
+        channel: channelName,
+        timestamp: new Date().toISOString()
+    };
+
+    applyMessageIds(response, message);
+    ws.send(JSON.stringify(response));
+
+    if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} unpublished from ${channelName} · notified ${notifiedLeave} member(s)`);
+}
+
+function handleListMessage(ws, message) {
+    const token = ws.token;
+    const channelData = message.channel;
+    
+    // Validar formato del canal
+    const validation = validateChannelFormat(channelData);
+    if (!validation.valid) {
+        const errorResponse = {
+            type: 'error',
+            code: validation.code, error: validation.error
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(errorResponse, message);
+        
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+    
+    const channelName = validation.channelName;
+
+    // ¿El canal es de otro nodo? La membresía la guarda su dueño.
+    const home = channelOwnerOf(channelName);
+    if (!home.local) {
+        if (!home.known) {
+            const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        // El timbre de la bóveda vive donde ella lo registró, que puede ser este nodo.
+        for (const [pubkey, w] of wakesForChannel(channelName)) wakeVault(pubkey, w);
+        forwardChannelOp(ws, message, home.owner, 'list', { channel: channelName });
+        return;
+    }
+
+    // Obtener tokens del canal (ya filtrados por expiración)
+    const tokens = getChannelTokens(channelName);
+    // Vacío y con una bóveda que se despierta detrás: se la llama y se dice, para que quien
+    // lista espere unos segundos en vez de concluir que esa cuenta no existe.
+    const waking = tokens.length === 0 ? wakesForChannel(channelName) : [];
+    for (const [pubkey, w] of waking) wakeVault(pubkey, w);
+    
+    const response = {
+        type: 'channel_list',
+        channel: channelName,
+        tokens: tokens,
+        ...(waking.length ? { waking: true } : {}),
+        count: tokens.length,
+        maxEntries: MAX_CHANNEL_ENTRIES,
+        timestamp: new Date().toISOString()
+    };
+    
+    // Incluir ID del mensaje original si existe
+    applyMessageIds(response, message);
+    
+    ws.send(JSON.stringify(response));
+    
+    if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} listed ${channelName}: ${tokens.length} token(s)`);
+}
+
+// Observar un canal (read-only): registra interés en sus eventos joined/left/
+// disconnected SIN publicarse como miembro. Devuelve la lista actual de tokens
+// para que el cliente tenga el estado inicial + luego los eventos en vivo.
+function handleWatchMessage(ws, message) {
+    const token = ws.token;
+    const validation = validateChannelFormat(message.channel);
+    if (!validation.valid) {
+        const e = { type: 'error', code: validation.code, error: validation.error };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+    }
+    const channelName = validation.channelName;
+    const home = channelOwnerOf(channelName);
+    if (!home.local) {
+        if (!home.known) {
+            const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        // El registro de observadores lo lleva el dueño, igual que la
+        // membresía; los eventos vuelven por la malla (`chan-event`).
+        forwardChannelOp(ws, message, home.owner, 'watch', { channel: channelName, instance: token });
+        return;
+    }
+    let set = channelWatchers.get(channelName);
+    if (!set) { set = new Set(); channelWatchers.set(channelName, set); }
+    set.add(token);
+    const tokens = getChannelTokens(channelName);
+    const response = { type: 'watched', channel: channelName, tokens, count: tokens.length, timestamp: new Date().toISOString() };
+    applyMessageIds(response, message);
+    ws.send(JSON.stringify(response));
+    if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} watches ${channelName} (${tokens.length} token(s))`);
+}
+
+function handleUnwatchMessage(ws, message) {
+    const token = ws.token;
+    const validation = validateChannelFormat(message.channel);
+    if (!validation.valid) {
+        const e = { type: 'error', code: validation.code, error: validation.error };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+    }
+    const channelName = validation.channelName;
+    const set = channelWatchers.get(channelName);
+    if (set) { set.delete(token); if (set.size === 0) channelWatchers.delete(channelName); }
+    const response = { type: 'unwatched', channel: channelName, timestamp: new Date().toISOString() };
+    applyMessageIds(response, message);
+    ws.send(JSON.stringify(response));
+}
+
+function handleListChannelsMessage(ws, message) {
+    const prefix = (typeof message.prefix === 'string') ? message.prefix : null;
+    const now = Date.now();
+    const channels = [];
+
+    for (const [name, entries] of publicChannels) {
+        if (prefix && !name.startsWith(prefix)) continue;
+        const validCount = entries.filter(e => now - e.publishedAt < CHANNEL_ENTRY_EXPIRY_MS).length;
+        if (validCount > 0) {
+            channels.push({ name, count: validCount });
+        }
+    }
+
+    const response = {
+        type: 'channels_list',
+        channels,
+        timestamp: new Date().toISOString()
+    };
+
+    if (prefix !== null) response.prefix = prefix;
+    applyMessageIds(response, message);
+    ws.send(JSON.stringify(response));
+}
+
+function handleChannelCountMessage(ws, message) {
+    const channelName = message.channel;
+
+    if (typeof channelName !== 'string' || channelName.length === 0) {
+        const errorResponse = {
+            type: 'error',
+            code: 'no-channel', error: 'channel is required (a non-empty string)'
+        };
+        applyMessageIds(errorResponse, message);
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+
+    const home = channelOwnerOf(channelName);
+    if (!home.local) {
+        if (!home.known) {
+            const e = { type: 'error', code: 'unknown-node', error: `unknown node for channel ${channelName}` };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        forwardChannelOp(ws, message, home.owner, 'count', { channel: channelName });
+        return;
+    }
+
+    const tokens = getChannelTokens(channelName);
+
+    const response = {
+        type: 'channel_count',
+        channel: channelName,
+        count: tokens.length,
+        maxEntries: MAX_CHANNEL_ENTRIES,
+        timestamp: new Date().toISOString()
+    };
+
+    applyMessageIds(response, message);
+    ws.send(JSON.stringify(response));
+}
+
+function handleDisconnectMessage(ws, message) {
+    const token = ws.token;
+    const targetToken = message.target;
+    
+    if (!targetToken || typeof targetToken !== 'string') {
+        const errorResponse = {
+            type: 'error',
+            error: 'Token destino requerido (string)'
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(errorResponse, message);
+        
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+    
+    // Verificar que el token destino no sea el mismo
+    if (targetToken === token) {
+        const errorResponse = {
+            type: 'error',
+            code: 'self-disconnect',
+            error: 'you cannot disconnect from yourself'
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(errorResponse, message);
+        
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+    
+    // Verificar que el token destino exista y esté conectado
+    const targetConn = activeConnections.get(targetToken);
+    if (!targetConn) {
+        const errorResponse = {
+            type: 'error',
+            code: 'unknown-token', error: `target token ${targetToken} not found or not connected`
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(errorResponse, message);
+        
+        ws.send(JSON.stringify(errorResponse));
+        return;
+    }
+    
+    // Remover el par de conexión y notificar a ambas partes
+    const result = removeConnectionPair(token, targetToken);
+    
+    if (result.success) {
+        // Enviar confirmación al cliente que solicitó la desconexión
+        const response = {
+            type: 'disconnect_confirmation',
+            target: targetToken,
+            timestamp: new Date().toISOString()
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(response, message);
+        
+        ws.send(JSON.stringify(response));
+        
+        if (process.env.NODE_ENV !== 'test') console.log(`[proxy] ${token} manually disconnected from ${targetToken}`);
+    } else {
+        const errorResponse = {
+            type: 'error',
+            code: result.code,
+            error: result.error
+        };
+        
+        // Incluir ID del mensaje original si existe
+        applyMessageIds(errorResponse, message);
+        
+        ws.send(JSON.stringify(errorResponse));
+    }
+}
+
+// ----- identify y direccionamiento por pubkey -----------------------
+
+/**
+ * ANUNCIAR LA LLAVE DE CIFRADO DE ESTA IDENTIDAD.
+ *
+ * Dos condiciones, y las dos hacen falta:
+ *   1. el anuncio va firmado por la pubkey de la que habla (eso lo ata a la identidad);
+ *   2. esta conexión YA se identificó como esa pubkey.
+ *
+ * La segunda no añade seguridad criptográfica —la firma ya lo dice todo— pero sí
+ * impide que un desconocido llene el directorio de anuncios de terceros que capturó
+ * por ahí. Anunciar es para uno mismo.
+ */
+function handleEncPubMessage(ws, message) {
+    try {
+        const data = message.data;
+        const sig = message.signature;
+        const ownPubkey = tokenToPubkey.get(ws.token);
+        if (!ownPubkey) {
+            const e = { type: 'error', error: 'encpub: identificate primero (identify)' };
+            applyMessageIds(e, message);
+            ws.send(JSON.stringify(e));
+            return;
+        }
+        if (!data || data.publickey !== ownPubkey) {
+            const e = { type: 'error', code: 'encpub-not-yours', error: 'encpub: the announcement does not belong to the identity of this connection' };
+            applyMessageIds(e, message);
+            ws.send(JSON.stringify(e));
+            return;
+        }
+        if (!verifyEncPubStatement(data, sig)) {
+            const e = { type: 'error', code: 'encpub-invalid', error: 'encpub: invalid or badly signed announcement' };
+            applyMessageIds(e, message);
+            ws.send(JSON.stringify(e));
+            return;
+        }
+        const stored = storeEncPub(data, sig);
+        // Se reparte SOLO lo que cambió: reenviar lo repetido haría que dos nodos se
+        // devolvieran el mismo anuncio para siempre.
+        if (stored) {
+            try { mesh.broadcastEncPub({ data, signature: sig }); }
+            catch (e) { console.warn('[encpub] mesh broadcast failed:', e.message); }
+        }
+        const response = { type: 'encpub-announced', publickey: data.publickey, stored: stored };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleEncPubMessage error:', e);
+        try {
+            const err = { type: 'error', error: 'Error interno en encpub' };
+            applyMessageIds(err, message);
+            ws.send(JSON.stringify(err));
+        } catch (_) {}
+    }
+}
+
+/**
+ * PREGUNTAR POR LA LLAVE DE CIFRADO DE OTRO. Se devuelve el anuncio TAL CUAL lo firmó
+ * su dueño; el que pregunta lo verifica. Lo que no hay se dice en `missing`, para que
+ * quien llama distinga «no la tiene nadie» de «se cayó la red» — son problemas
+ * distintos: uno se arregla cuando el otro actualice, el otro esperando.
+ */
+function handleEncLookupMessage(ws, message) {
+    try {
+        const requested = Array.isArray(message.publickeys)
+            ? message.publickeys
+            : (typeof message.publickeys === 'string' ? [message.publickeys] : null);
+        if (!requested || requested.length === 0) {
+            const e = { type: 'error', code: 'bad-input', error: 'enc-lookup: missing publickeys' };
+            applyMessageIds(e, message);
+            ws.send(JSON.stringify(e));
+            return;
+        }
+        if (requested.length > MAX_ENCPUB_LOOKUP) {
+            const e = { type: 'error', code: 'too-many-keys', error: `enc-lookup: too many keys (${requested.length}); the maximum is ${MAX_ENCPUB_LOOKUP}` };
+            applyMessageIds(e, message);
+            ws.send(JSON.stringify(e));
+            return;
+        }
+        const keys = [];
+        const missing = [];
+        for (const pk of requested) {
+            const entry = typeof pk === 'string' ? encPubs.get(pk) : null;
+            if (entry) keys.push({ data: entry.data, signature: entry.signature });
+            else missing.push(pk);
+        }
+        const response = { type: 'enc-lookup', keys, missing, timestamp: new Date().toISOString() };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleEncLookupMessage error:', e);
+        try {
+            const err = { type: 'error', error: 'Error interno en enc-lookup' };
+            applyMessageIds(err, message);
+            ws.send(JSON.stringify(err));
+        } catch (_) {}
+    }
+}
+
+async function handleIdentifyMessage(ws, message) {
+    const token = ws.token;
+    try {
+        const data = message.data;
+        const sig  = message.signature;
+        if (!data || !sig || data.op !== 'identify' || !data.publickey || !data.token || !data.ts) {
+            const errorResponse = {
+                type: 'error',
+                code: 'bad-format', error: 'invalid identify format (expected data:{op:"identify",publickey,token,ts}+signature)'
+            };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+        const skew = Math.abs(Date.now() - Number(data.ts));
+        if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
+            const errorResponse = { type: 'error', code: 'stale', error: 'identify ts outside the ±5 min window' };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+        if (data.token !== ws.token) {
+            const errorResponse = { type: 'error', code: 'token-mismatch', error: 'identify.token does not match this connection' };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+        // ¿VIENE DIRIGIDO A MÍ? (ver PROXY_AUDIENCE, arriba). Mientras dure la migración
+        // se cuenta y se dice; con `PROXY_AUDIENCE_ENFORCE=1` se rechaza.
+        const audOk = PROXY_AUDIENCE && typeof data.aud === 'string' &&
+            data.aud.replace(/\/+$/, '') === PROXY_AUDIENCE;
+        if (!audOk) {
+            if (PROXY_AUDIENCE_ENFORCE) {
+                const errorResponse = { type: 'error', code: 'wrong-audience', error: 'identify without an audience, or addressed to another proxy' };
+                applyMessageIds(errorResponse, message);
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            const n = (identifyWithoutAudience.get(data.publickey) || 0) + 1;
+            identifyWithoutAudience.set(data.publickey, n);
+            // Una línea por llave, no una por identify: reconectar es normal y no hace
+            // falta repetirlo. Lo que se quiere saber es QUIÉN falta por actualizar.
+            if (n === 1) {
+                console.warn(`[proxy] identify without an audience (aud) from ${String(data.publickey).slice(0, 60)}… — client needs @dotrino/proxy-client >= 0.18`);
+            }
+        }
+        let pubKeyJwk;
+        try { pubKeyJwk = JSON.parse(data.publickey); }
+        catch (_) {
+            const errorResponse = { type: 'error', code: 'bad-publickey', error: 'identify.publickey must be a serialized JWK' };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+        const ok = verifySignatureWithJWK(data, sig, pubKeyJwk);
+        if (!ok) {
+            const errorResponse = { type: 'error', code: 'bad-signature', error: 'invalid identify signature' };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+            return;
+        }
+        // Si este token estaba bound a OTRA pubkey, lo soltamos primero.
+        const prevPub = tokenToPubkey.get(ws.token);
+        if (prevPub && prevPub !== data.publickey) {
+            const oldSet = pubkeyToTokens.get(prevPub);
+            if (oldSet) {
+                oldSet.delete(ws.token);
+                if (oldSet.size === 0) pubkeyToTokens.delete(prevPub);
+            }
+        }
+        // Una pubkey puede estar simultáneamente en varios tokens: añadimos
+        // a la set en lugar de reemplazar. Solo el primero drena la cola
+        // offline; las siguientes instancias no reciben nada antiguo.
+        const wasFirstInstance =
+            !pubkeyToTokens.has(data.publickey) ||
+            pubkeyToTokens.get(data.publickey).size === 0;
+        bindPubkey(data.publickey, ws.token);
+        // QUÉ APP ES (fuera de lo firmado: es ruteo, y quien tiene la llave ya puede leerlo
+        // todo). Con app, baja SU parte de la cola aunque la llave ya estuviera conectada en
+        // otra app del mismo aparato; sin app, como siempre: solo la primera instancia.
+        const connApp = appOf(message.app);
+        const selfConn = activeConnections.get(ws.token);
+        if (selfConn) selfConn.app = connApp;
+        // Federación: este proxy queda registrado como "home" de esta pubkey
+        // (persistente con TTL), para encolar sus mensajes federados offline.
+        registerHome(data.publickey);
+
+        // "Una identidad": si el cliente presenta un CERT que delega ESTA pubkey D desde
+        // una maestra M, registramos el token TAMBIÉN bajo M → los mensajes a M llegan a
+        // este dispositivo (sin la privada de M). Aditivo: sin cert, idéntico a antes.
+        unbindExtraPubkeys(ws.token);
+        let masterDelivered = 0;
+        let masterBound = null;
+        const master = verifyDeviceCert(message.cert, data.publickey);
+        if (master && master !== data.publickey) {
+            const masterWasFirst = !pubkeyToTokens.has(master) || pubkeyToTokens.get(master).size === 0;
+            bindExtraPubkey(master, ws.token);
+            registerHome(master);
+            masterBound = master;
+            if (masterWasFirst || connApp) masterDelivered = await flushOfflineFor(master, ws, connApp);
+        }
+
+        // Acta de perfil: bindea también el `profileId` (la PERSONA), de modo que un
+        // mensaje dirigido a ella llegue a cualquiera de sus dispositivos conectados.
+        let profileBound = null;
+        let profileDelivered = 0;
+        const profileId = verifyActaMembership(message.acta, data.publickey);
+        if (profileId && profileId !== data.publickey && profileId !== masterBound) {
+            const profileWasFirst = !pubkeyToTokens.has(profileId) || pubkeyToTokens.get(profileId).size === 0;
+            bindExtraPubkey(profileId, ws.token);
+            registerHome(profileId);
+            profileBound = profileId;
+            if (profileWasFirst || connApp) profileDelivered = await flushOfflineFor(profileId, ws, connApp);
+        } else if (profileId) {
+            profileBound = profileId;
+        }
+
+        const delivered = (wasFirstInstance || connApp) ? await flushOfflineFor(data.publickey, ws, connApp) : 0;
+        const response = { type: 'identified', publickey: data.publickey, queued_delivered: delivered + masterDelivered + profileDelivered, master: masterBound, profile: profileBound };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleIdentifyMessage error:', e);
+        try {
+            const errorResponse = { type: 'error', error: 'Error interno en identify' };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+        } catch (_) {}
+    }
+}
+
+// Registrar/actualizar la push subscription de una pubkey. El sobre va
+// firmado por el vault (misma verificación que identify): la firma prueba
+// que quien envía la subscription es dueño de esa pubkey.
+//   data: { op:'push-subscribe', publickey, subscription, ts }
+function handlePushSubscribeMessage(ws, message) {
+    const token = ws.token;
+    try {
+        const data = message.data;
+        const sig  = message.signature;
+        if (!data || !sig || data.op !== 'push-subscribe' || !data.publickey || !data.subscription || !data.ts) {
+            const e = { type: 'error', code: 'bad-format', error: 'invalid push-subscribe format (expected data:{op:"push-subscribe",publickey,subscription,ts}+signature)' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const skew = Math.abs(Date.now() - Number(data.ts));
+        if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
+            const e = { type: 'error', code: 'stale', error: 'push-subscribe ts outside the ±5 min window' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        let pubKeyJwk;
+        try { pubKeyJwk = JSON.parse(data.publickey); }
+        catch (_) {
+            const e = { type: 'error', code: 'bad-publickey', error: 'push-subscribe.publickey must be a serialized JWK' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
+            const e = { type: 'error', code: 'bad-signature', error: 'invalid push-subscribe signature' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        // La subscription viaja como string JSON (sobre plano => firma canónica
+        // idéntica entre cliente/vault/servidor). La parseamos para guardarla.
+        let subscription = data.subscription;
+        if (typeof subscription === 'string') {
+            try { subscription = JSON.parse(subscription); }
+            catch (_) {
+                const e = { type: 'error', code: 'bad-subscription', error: 'push-subscribe.subscription is not valid JSON' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+        }
+        // Dos formas: la PushSubscription del navegador (endpoint + keys) o el token de
+        // la app nativa (`{ kind:'fcm', token }` en Android, `{ kind:'apns', token, topic, env }`
+        // en iOS). Cualquier otra cosa no es una suscripción.
+        // EL TIMBRE DE UNA BÓVEDA QUE NO VIVE CONECTADA (`{ kind:'wake', url }`): lo firma su
+        // llave de comunicación y el acta prueba que es de la cuenta, así que se guarda para
+        // la CUENTA, que es a quien le escriben los servicios. Sin acta válida no hay timbre.
+        const wake = parseWakeSubscription(subscription);
+        if (wake) {
+            const profileId = verifyActaMembership(message.acta, data.publickey);
+            if (!profileId) {
+                const e = { type: 'error', code: 'not-a-member', error: 'push-subscribe (wake): the record does not name this key' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+            // Con `self` se guarda para quien firma (un miembro de esa cuenta); sin él, para
+            // la cuenta. Las dos plazas son distintas: una réplica no le quita la suya a la bóveda.
+            const owner = wake.self ? data.publickey : profileId;
+            setPushSubscription(owner, WAKE_APP, wake);
+            registerHome(owner);
+            const response = { type: 'push-subscribed', publickey: owner, app: WAKE_APP };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+            return;
+        }
+        const isWeb = subscription && typeof subscription.endpoint === 'string';
+        const isFcm = subscription && subscription.kind === 'fcm' && typeof subscription.token === 'string' && subscription.token.length > 20 && subscription.token.length < 4096;
+        const apns = parseApnsSubscription(subscription);
+        if (!isWeb && !isFcm && !apns) {
+            const e = { type: 'error', error: 'push-subscribe.subscription: expected a PushSubscription, { kind:"fcm", token } or { kind:"apns", token, topic, env }' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        if (isFcm) subscription = { kind: 'fcm', token: subscription.token };
+        if (apns) subscription = apns;
+        // `data.app` va DENTRO de lo firmado: dice qué app de este aparato recibe el timbre.
+        const subApp = appOf(data.app);
+        setPushSubscription(data.publickey, subApp, subscription);
+        const response = { type: 'push-subscribed', publickey: data.publickey, app: subApp };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handlePushSubscribeMessage error:', e);
+    }
+}
+
+// UN RECEPTOR DICE QUÉ LLAVES LE QUEDAN, y se quitan sus demás suscripciones.
+//   { type:'push-prune', target, app?, keep:[publickey…] }
+//
+// Es la baja de una cuenta que el aparato YA NO TIENE: la quitó, y con ella la llave con
+// la que firmaría un `push-unsubscribe`. Sin esto el teléfono seguía sonando con los
+// pedidos de una cuenta borrada (dueño, 2026-10-12).
+//
+// No va firmado, y no puede: no queda llave. Lo que autoriza es conocer el `target` (el
+// token de APNs/FCM o el endpoint de Web Push), que solo tienen ese aparato y este proxio.
+// Y lo único que se consigue con él es dejar de timbrar a ESE receptor.
+function handlePushPruneMessage(ws, message) {
+    try {
+        const { target, keep } = message;
+        if (typeof target !== 'string' || !target || !Array.isArray(keep) || keep.some((k) => typeof k !== 'string')) {
+            const e = { type: 'error', code: 'bad-format', error: 'invalid push-prune format (expected target:string, keep:[publickey…], app?)' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const removed = prunePushSubscriptions(target, message.app === undefined ? undefined : appOf(message.app), new Set(keep));
+        const response = { type: 'push-pruned', removed };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handlePushPruneMessage error:', e);
+        const err = { type: 'error', error: 'internal error in push-prune' };
+        applyMessageIds(err, message);
+        try { ws.send(JSON.stringify(err)); } catch (_) {}
+    }
+}
+
+// Borrar la push subscription de una pubkey (la PWA desactiva notifs).
+//   data: { op:'push-unsubscribe', publickey, ts }
+function handlePushUnsubscribeMessage(ws, message) {
+    try {
+        const data = message.data;
+        const sig  = message.signature;
+        if (!data || !sig || data.op !== 'push-unsubscribe' || !data.publickey || !data.ts) {
+            const e = { type: 'error', code: 'bad-format', error: 'invalid push-unsubscribe format' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const skew = Math.abs(Date.now() - Number(data.ts));
+        if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
+            const e = { type: 'error', code: 'stale', error: 'push-unsubscribe ts outside the ±5 min window' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        let pubKeyJwk;
+        try { pubKeyJwk = JSON.parse(data.publickey); }
+        catch (_) {
+            const e = { type: 'error', code: 'bad-publickey', error: 'push-unsubscribe.publickey must be a serialized JWK' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        if (!verifySignatureWithJWK(data, sig, pubKeyJwk)) {
+            const e = { type: 'error', code: 'bad-signature', error: 'invalid push-unsubscribe signature' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        // Con `app`, solo la de esa app; sin ella (cliente viejo), todas las de la llave.
+        removePushSubscription(data.publickey, data.app === undefined ? undefined : appOf(data.app));
+        const response = { type: 'push-unsubscribed', publickey: data.publickey };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handlePushUnsubscribeMessage error:', e);
+    }
+}
+
+// Helper: valida sobre firmado por el vault y devuelve la pubkey (o null).
+// Self-only: el target SIEMPRE es data.publickey (quien firma).
+function verifySignedOp(ws, message, op) {
+    const data = message.data;
+    const sig  = message.signature;
+    if (!data || !sig || data.op !== op || !data.publickey || !data.ts) {
+        const e = { type: 'error', code: 'bad-format', error: `invalid ${op} format` };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
+    }
+    const skew = Math.abs(Date.now() - Number(data.ts));
+    if (!Number.isFinite(skew) || skew > IDENTIFY_TS_TOLERANCE_MS) {
+        const e = { type: 'error', code: 'stale', error: `${op} ts outside the ±5 min window` };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
+    }
+    let jwk;
+    try { jwk = JSON.parse(data.publickey); }
+    catch (_) {
+        const e = { type: 'error', code: 'bad-publickey', error: `${op}.publickey must be a serialized JWK` };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
+    }
+    if (!verifySignatureWithJWK(data, sig, jwk)) {
+        const e = { type: 'error', code: 'bad-signature', error: `invalid ${op} signature` };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return null;
+    }
+    return data;
+}
+
+// Credenciales TURN temporales (Cloudflare) para WebRTC. Solo para
+// conexiones YA identificadas con esa misma pubkey: la firma del sobre
+// prueba la identidad, y el bind pubkey↔token evita re-jugar un sobre
+// ajeno desde otro socket. El TTL corto + cuota por pubkey/hora evitan
+// que las credenciales se farmeen para tráfico ajeno al ecosistema.
+//   data: { op:'turn-credentials', publickey, ts }
+async function handleTurnCredentialsMessage(ws, message) {
+    try {
+        const data = verifySignedOp(ws, message, 'turn-credentials');
+        if (!data) return;
+        const boundPubkey = tokenToPubkey.get(ws.token);
+        if (boundPubkey !== data.publickey) {
+            const e = { type: 'error', code: 'not-identified', error: 'turn-credentials requires a prior identify with that pubkey' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        if (!turnIssuer.enabled) {
+            const response = { type: 'turn-credentials', enabled: false };
+            applyMessageIds(response, message);
+            ws.send(JSON.stringify(response));
+            return;
+        }
+        const result = await turnIssuer.issue(data.publickey);
+        if (result.limited) {
+            const why = {
+                'turn-daily-cap': 'turn-credentials: daily traffic cap reached',
+                'turn-usage-unknown': 'turn-credentials: usage cannot be read, not issuing',
+                'turn-quota': 'turn-credentials: hourly quota reached'
+            };
+            // 429: «ahora no». El cliente sigue por el proxio y vuelve a pedir pasado
+            // `retry_after_ms` (proxy-client ≥ 0.32.0).
+            const e = {
+                type: 'error',
+                status: 429,
+                code: result.reason,
+                error: why[result.reason],
+                retry_after_ms: result.retry_after_ms
+            };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        const response = {
+            type: 'turn-credentials',
+            enabled: true,
+            iceServers: result.iceServers,
+            expiresAt: result.expiresAt,
+            ttl: result.ttl
+        };
+        applyMessageIds(response, message);
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleTurnCredentialsMessage error:', e.message);
+        try {
+            const errorResponse = { type: 'error', error: 'turn-credentials: error emitiendo credenciales' };
+            applyMessageIds(errorResponse, message);
+            ws.send(JSON.stringify(errorResponse));
+        } catch (_) {}
+    }
+}
+
+// Programar un push a la PROPIA pubkey. data.spec = JSON string con
+// { fireAt?:ms (one-shot) | cron?:string + tz?:string, payload?:object }.
+function handleSchedulePushMessage(ws, message) {
+    try {
+        const data = verifySignedOp(ws, message, 'schedule-push');
+        if (!data) return;
+        let spec;
+        try { spec = JSON.parse(data.spec); }
+        catch (_) {
+            const e = { type: 'error', code: 'bad-spec', error: 'schedule-push.spec is not valid JSON' };
+            applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+        }
+        let nextFire;
+        const cron = spec.cron || null;
+        const tz = spec.tz || null;
+        if (cron) {
+            nextFire = cronNextFire(cron, tz, Date.now());
+            if (!nextFire) {
+                const e = { type: 'error', code: 'bad-cron', error: 'invalid cron' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+        } else {
+            nextFire = Number(spec.fireAt);
+            if (!Number.isFinite(nextFire) || nextFire <= Date.now()) {
+                const e = { type: 'error', code: 'bad-fireat', error: 'fireAt must be a future timestamp (ms)' };
+                applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+            }
+        }
+        const payload = spec.payload ? JSON.stringify(spec.payload) : null;
+        // `data.app` va DENTRO de lo firmado, como en push-subscribe: el timbre es dirigido.
+        const jobId = persist.insertScheduledPush({ pubkey: data.publickey, app: appOf(data.app), payload, nextFire, cron, tz });
+        const response = { type: 'push-scheduled', jobId, nextFire };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleSchedulePushMessage error:', e);
+    }
+}
+
+// Cancelar un job propio. data.jobId.
+function handleCancelPushMessage(ws, message) {
+    try {
+        const data = verifySignedOp(ws, message, 'cancel-push');
+        if (!data) return;
+        const jobId = Number(data.jobId);
+        const job = persist.getScheduledPush(jobId);
+        // Self-only: solo podés cancelar tus propios jobs.
+        if (job && job.pubkey === data.publickey) persist.deleteScheduledPush(jobId);
+        const response = { type: 'push-canceled', jobId };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleCancelPushMessage error:', e);
+    }
+}
+
+// Listar los jobs propios.
+function handleListPushesMessage(ws, message) {
+    try {
+        const data = verifySignedOp(ws, message, 'list-pushes');
+        if (!data) return;
+        const rows = persist.listScheduledPushesForPubkey(data.publickey);
+        const jobs = rows.map(r => ({
+            jobId: r.id,
+            app: r.app || null,
+            nextFire: r.next_fire,
+            cron: r.cron || null,
+            tz: r.tz || null,
+            payload: r.payload ? JSON.parse(r.payload) : null
+        }));
+        const response = { type: 'push-list', jobs };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+    } catch (e) {
+        console.error('handleListPushesMessage error:', e);
+    }
+}
+
+// ----- citas de emparejamiento (el código corto que ve un humano) -----
+
+/** Emite (o renueva) la cita de ESTA conexión. */
+function handlePairCodeMessage(ws, message) {
+    if (!nodeIdentity) {
+        const e = { type: 'error', code: 'no-node-identity', error: 'this node cannot issue codes (it has no node identity)' };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+    }
+    const res = pairingCodes.create({
+        instance: ws.token,
+        pubkey: tokenToPubkey.get(ws.token) || null,
+        hint: nodeIdentity.hint,
+        ttlMs: message.ttlMs
+    });
+    if (!res) {
+        const e = { type: 'error', code: 'code-failed', error: 'could not issue the code' };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+    }
+    const response = { type: 'pair-code', code: res.code, expiresAt: res.expiresAt, node: nodeIdentity.nodeId };
+    applyMessageIds(response, message);
+    ws.send(JSON.stringify(response));
+}
+
+/**
+ * Canjea una cita y devuelve a quién apunta.
+ *
+ * Los 2 primeros caracteres del código son un FILTRO —los dos primeros del id
+ * del nodo que lo emitió—, no un reclamo exclusivo: puede haber más de un
+ * candidato. Se les pregunta a TODOS los que coincidan (en la práctica, uno)
+ * y se exige que conteste que sí EXACTAMENTE UNO.
+ *
+ * Nunca se elige "el primero que conteste": ahí es donde un nodo hostil se
+ * cuela a quedarse con emparejamientos ajenos. Si contestan dos, se rechaza y
+ * se pide otro código — molesta, pero no entrega a nadie con quien no era.
+ * Y como el filtro sale del id DERIVADO de la llave, un nodo no puede siquiera
+ * figurar como candidato de un código que no le corresponde.
+ */
+function handlePairRedeemMessage(ws, message) {
+    const raw = message.code;
+    const code = require('./pairingCodes').normalizeCode(raw);
+    // Se valida la FORMA antes de mover nada por la malla: un código con
+    // símbolos que este ecosistema no emite no puede existir en ningún nodo,
+    // así que preguntarlo sería tráfico s2s regalado a quien mande basura.
+    if (!code || code.length !== nodeIdentityLib.CODE_HINT_LEN + 4 || !require('./alphabet').isEmittable(code)) {
+        const e = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid code' };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+    }
+    const hint = code.slice(0, nodeIdentityLib.CODE_HINT_LEN);
+
+    const remotes = nodeIdentity ? peerRegistry.candidatesByHint(hint) : [];
+    const isCandidate = !nodeIdentity || hint === nodeIdentity.hint;
+
+    // Caso común y barato: solo yo puedo tenerlo.
+    if (isCandidate && remotes.length === 0) {
+        const r = pairingCodes.redeem(code);
+        const response = r.error
+            ? { type: 'pair-redeem', ok: false, code: r.code, error: r.error }
+            : { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
+        applyMessageIds(response, message);
+        ws.send(JSON.stringify(response));
+        return;
+    }
+    if (!isCandidate && remotes.length === 0) {
+        const e = { type: 'pair-redeem', ok: false, code: 'unknown-code-node', error: 'no known node can hold that code' };
+        applyMessageIds(e, message); ws.send(JSON.stringify(e)); return;
+    }
+
+    // Hay varios candidatos (o uno remoto): se pregunta a todos y se espera.
+    const rid = `r${++redeemSeq}`;
+    const local = isCandidate ? pairingCodes.redeem(code) : null;
+    const pending = {
+        ws, message,
+        expected: remotes.length,
+        replies: local && !local.error ? [{ instance: local.instance, pubkey: local.pubkey }] : [],
+        received: 0,
+        timer: null
+    };
+    const resolve = () => {
+        if (!pendingRedeems.has(rid)) return;
+        pendingRedeems.delete(rid);
+        clearTimeout(pending.timer);
+        let response;
+        if (pending.replies.length === 1) {
+            const r = pending.replies[0];
+            response = { type: 'pair-redeem', ok: true, instance: r.instance, publickey: r.pubkey || null };
+        } else if (pending.replies.length > 1) {
+            // Colisión real o un nodo mintiendo. En los dos casos la respuesta
+            // correcta es la misma: no adivinar.
+            response = { type: 'pair-redeem', ok: false, code: 'ambiguous-code', error: 'ambiguous code: ask for a new one' };
+            console.warn(`[pair] ambiguous code (${pending.replies.length} nodes claim it) — filter ${hint}`);
+        } else {
+            response = { type: 'pair-redeem', ok: false, code: 'invalid-code', error: 'invalid or already used code' };
+        }
+        applyMessageIds(response, pending.message);
+        try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
+    };
+    pending.resolve = resolve;
+    pending.timer = setTimeout(resolve, 6000);
+    if (pending.timer.unref) pending.timer.unref();
+    pendingRedeems.set(rid, pending);
+
+    let sentCount = 0;
+    for (const peer of remotes) {
+        if (mesh.sendTo(peer.pubkey, 'pair-redeem', { rid, code }, { retain: false })) sentCount++;
+    }
+    pending.expected = sentCount;
+    // Si ningún candidato remoto era alcanzable, se resuelve ya con lo local.
+    if (sentCount === 0) resolve();
+}
+
+async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
+    const senderPubkey = tokenToPubkey.get(ws.token) || null;
+    const now = Date.now();
+    // Mensaje EFÍMERO: si el destinatario no está ahora, no vale la pena
+    // guardarlo. La cola offline entrega hasta 24 h después, que es correcto
+    // para un mensaje de chat y veneno para el tráfico de tiempo real: una
+    // jugada de ajedrez o una oferta SDP entregadas mañana no solo son
+    // inútiles, reinician negociaciones imposibles y muestran movimientos
+    // fuera de contexto. Lo marca quien envía, que es el único que sabe si su
+    // payload caduca.
+    const ephemeral = message.ephemeral === true;
+    // Mensaje CALLADO: se encola igual, pero no se toca el timbre push. Lo marca quien
+    // envía para lo que puede esperar a que la otra punta abra sola (un aviso de que
+    // algo cambió). Sin esto, cada aviso de la bóveda hacía sonar el teléfono con
+    // «alguien pide tus claves», y al abrir no había ningún pedido.
+    const quiet = message.quiet === true;
+    // A QUÉ APP va (ruteo, ver `appOf`). Sin app: a todas las de esa llave.
+    const app = appOf(message.app);
+    const expiresAt = now + OFFLINE_TTL_MS;
+    const sentInline = [];
+    const queued = [];
+    const dropped = [];
+    const failed = [];
+    // Por qué no se pudo encolar (p. ej. `queue-unavailable`): sin esto, «no está y no
+    // se pudo guardar» se veía igual que un destinatario inválido.
+    let queueError = null;
+    let totalDeliveries = 0;
+    const queueFor = async (pk) => {
+        try {
+            await enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes: bytesOfMessage(message.message), app });
+        } catch (e) {
+            console.error(`[queue] message for an offline recipient could not be queued (${e.code || 'error'}): ${e.message}`);
+            queueError = e.code || 'queue-unavailable';
+            failed.push(pk);
+            return;
+        }
+        queued.push(pk);
+        // Timbre push (sin contenido): despierta a la app destinataria
+        // para que reconecte y baje su cola. Best-effort.
+        if (!quiet) ringPush(pk, app, ringHint(message.message));
+    };
+    for (const pk of targetPubkeys) {
+        if (!pk || typeof pk !== 'string') { failed.push(pk); continue; }
+        // Self?
+        if (senderPubkey && pk === senderPubkey) { failed.push(pk); continue; }
+        const targetTokens = pubkeyToTokens.get(pk);  // Set or undefined
+        // Filtrar tokens cuyo ws siga vivo (no debería haber zombies, pero por si acaso).
+        const liveConns = [];
+        if (targetTokens) {
+            for (const t of targetTokens) {
+                const conn = activeConnections.get(t);
+                // Solo las conexiones de ESA app (o las que no dijeron cuál): si la app
+                // destino no está abierta, el mensaje se encola para ella aunque otra app
+                // del mismo aparato esté conectada.
+                if (conn && appMatches(conn.app, app)) liveConns.push({ token: t, conn });
+            }
+        }
+        if (liveConns.length > 0) {
+            let anySent = false;
+            // Fan-out: una entrega por cada instancia activa de la pubkey.
+            for (const { token: targetToken, conn } of liveConns) {
+                try {
+                    wireBody.sendMessage(conn.ws, { type: 'message', from: ws.token, from_publickey: senderPubkey }, message.message);
+                    connectionPairs.add(createPairKey(ws.token, targetToken));
+                    anySent = true;
+                    totalDeliveries++;
+                } catch (_) { /* skip esa instancia, intenta las demás */ }
+            }
+            if (anySent) {
+                sentInline.push(pk);
+                // EL TIMBRE SUENA SIEMPRE, también cuando se entrega en vivo, y la app
+                // decide qué hace con él (dueño, 2026-10-16). Una conexión que el proxio
+                // cree viva puede estar muerta: un teléfono que pasó a segundo plano tarda
+                // hasta un minuto en caer por el latido, y lo que se le entrega ahí no lo
+                // ve nadie — así no llegó un pedido de aprobación hasta cerrar y abrir la
+                // app. Adivinar aquí si la app «está» es justo lo que fallaba. Solo no
+                // suenan los callados (los marca quien envía) y los efímeros (tiempo real:
+                // tarde no sirven).
+                if (!quiet && !ephemeral) ringPush(pk, app, ringHint(message.message));
+            } else failed.push(pk);
+        } else if (PROXY_PEERS.length) {
+            // Federación: no hay instancias locales → reenviar a la malla (un
+            // peer puede tener al destinatario online, o ser su home y encolar).
+            // ADEMÁS encolamos local como FALLBACK para no perder el mensaje si
+            // el home aún no se conoce (la app dedup por `mid`). El receptor
+            // federado, en cambio, solo encola si es home (evita acumular en
+            // proxies intermedios).
+            forwardToPeers(pk, message.message, senderPubkey, now, expiresAt, ephemeral, quiet, app);
+            if (ephemeral) {
+                // Se intenta la entrega en vivo por la malla, pero no se guarda
+                // nada: si el destinatario no está, se perdió y punto.
+                dropped.push(pk);
+            } else {
+                await queueFor(pk);
+            }
+        } else if (ephemeral) {
+            // Sin federación y sin destinatario local: no hay a quién entregar.
+            dropped.push(pk);
+        } else {
+            // Sin federación: comportamiento actual (cola offline 24h single-drain).
+            await queueFor(pk);
+        }
+    }
+    if (queued.length || failed.length || dropped.length) {
+        const response = {
+            type: 'message_sent',
+            sent: sentInline.length,
+            deliveries: totalDeliveries,  // entregas reales tras fan-out
+            queued: queued,
+            failed: failed
+        };
+        // `dropped` solo aparece con mensajes efímeros: dice "no se guardó",
+        // que para la app NO es lo mismo que "falló" ni que "quedó encolado".
+        if (dropped.length) response.dropped = dropped;
+        if (queueError) response.code = queueError;
+        applyMessageIds(response, message);
+        try { ws.send(JSON.stringify(response)); } catch (_) {}
+    }
+}
 // Handles de intervalos para poder limpiarlos en stop()
 let channelCleanupInterval = null;
 let livenessInterval = null;
