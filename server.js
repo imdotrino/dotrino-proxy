@@ -333,6 +333,9 @@ function applyFederationConfig(log = console.log) {
 
 // Citas de emparejamiento: el código corto que ve un humano. Ver pairingCodes.js.
 const { PairingCodes } = require('./pairingCodes');
+const { ActaCache } = require('./actaCache');
+/** Las últimas actas de cada cuenta (ver `actaCache.js`): una caché, no una fuente de verdad. */
+const actaCache = new ActaCache();
 const pairingCodes = new PairingCodes();
 
 // Mensajes relayados a una instancia de otro nodo, esperando por si el dueño dice que ya
@@ -1049,6 +1052,18 @@ function profileVouchesFor(acta) {
 }
 
 function verifyActaMembership(acta, deviceJwkStr) {
+    const profileId = verifyActaSeal(acta);
+    if (!profileId) return null;
+    if (!acta.members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
+    return profileId;
+}
+
+/**
+ * ¿Es esta acta de la cuenta que dice ser? Lo mismo que `verifyActaMembership` sin mirar quién
+ * la presenta: para la caché de actas (`actaCache.js`), que la guarda la traiga quien la traiga.
+ * Devuelve el `profileId`, o `null`.
+ */
+function verifyActaSeal(acta) {
     if (!acta || typeof acta !== 'object' || !ACTA_VERSIONS.includes(acta.v)) return null;
     const { profileId, sealer, sealedBy, members, sig } = acta;
     if (typeof profileId !== 'string' || typeof sealedBy !== 'string') return null;
@@ -1056,7 +1071,6 @@ function verifyActaMembership(acta, deviceJwkStr) {
     // si no, quien selló lo dice `sealedBy` y punto.
     if (sealer !== undefined && typeof sealer !== 'string') return null;
     if (typeof sig !== 'string' || !Array.isArray(members)) return null;
-    if (!members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
 
     // LA FIRMA TIENE QUE PROBAR EL `profileId`, NO SOLO EL ACTA.
     //
@@ -2316,6 +2330,12 @@ wss.on('connection', (ws, req) => {
             } else if (message.type === 'enc-lookup') {
                 handleEncLookupMessage(ws, message);
                 return;
+            } else if (message.type === 'acta-put') {
+                handleActaPutMessage(ws, message);
+                return;
+            } else if (message.type === 'acta-get') {
+                handleActaGetMessage(ws, message);
+                return;
             }
             
             // Mensaje regular (to + message) o (to_publickey + message)
@@ -2928,6 +2948,31 @@ function handleEncPubMessage(ws, message) {
  * quien llama distinga «no la tiene nadie» de «se cayó la red» — son problemas
  * distintos: uno se arregla cuando el otro actualice, el otro esperando.
  */
+/**
+ * `acta-put {acta}`: guardar en la caché un acta de una cuenta. Vale la traiga quien la traiga
+ * (la bóveda al cambiarla, un agente que se acaba de enterar): lo que decide es el sello, igual
+ * que al identificarse. Contesta `acta-put {stored}`; `stored:false` es que ya la tenía o que
+ * hay más nuevas, no un error.
+ */
+function handleActaPutMessage(ws, message) {
+    const reply = (r) => { applyMessageIds(r, message); ws.send(JSON.stringify(r)); };
+    const profileId = verifyActaSeal(message.acta);
+    if (!profileId) return reply({ type: 'error', code: 'bad-acta', error: 'acta-put: the record is not sealed by its account' });
+    reply({ type: 'acta-put', profileId, seq: message.acta.seq, stored: actaCache.put(profileId, message.acta) });
+}
+
+/**
+ * `acta-get {profileId, sinceSeq?}`: las actas guardadas de esa cuenta más nuevas que
+ * `sinceSeq`, de la más nueva a la más vieja. Lista vacía = no hay ninguna más nueva AQUÍ, no
+ * que no exista: quien pregunta sigue con la bóveda.
+ */
+function handleActaGetMessage(ws, message) {
+    const reply = (r) => { applyMessageIds(r, message); ws.send(JSON.stringify(r)); };
+    if (typeof message.profileId !== 'string' || !message.profileId) return reply({ type: 'error', code: 'bad-input', error: 'acta-get: missing profileId' });
+    const since = Number.isInteger(message.sinceSeq) ? message.sinceSeq : -1;
+    reply({ type: 'acta-get', profileId: message.profileId, actas: actaCache.get(message.profileId, since) });
+}
+
 function handleEncLookupMessage(ws, message) {
     try {
         const requested = Array.isArray(message.publickeys)
@@ -3072,6 +3117,7 @@ async function handleIdentifyMessage(ws, message) {
         let profileBound = null;
         let profileDelivered = 0;
         const profileId = verifyActaMembership(message.acta, data.publickey);
+        if (profileId) actaCache.put(profileId, message.acta);
         if (profileId && profileId !== data.publickey && profileId !== masterBound) {
             const profileWasFirst = !pubkeyToTokens.has(profileId) || pubkeyToTokens.get(profileId).size === 0;
             bindExtraPubkey(profileId, ws.token);
@@ -3149,6 +3195,7 @@ function handlePushSubscribeMessage(ws, message) {
             }
             // Con `self` se guarda para quien firma (un miembro de esa cuenta); sin él, para
             // la cuenta. Las dos plazas son distintas: una réplica no le quita la suya a la bóveda.
+            actaCache.put(profileId, message.acta);
             const owner = wake.self ? data.publickey : profileId;
             setPushSubscription(owner, WAKE_APP, wake);
             registerHome(owner);
@@ -3825,7 +3872,7 @@ function setTurnIssuer(newIssuer) {
 // `applyFederationConfig` sale aquí por lo mismo que `setTurnIssuer`: es la costura
 // por donde entra la configuración de la bóveda, y probarla de verdad exige poder
 // llamarla con el servidor ya escuchando (que es justo cuando llega el bundle).
-module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, canSeal, _ringHint: ringHint };
+module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, setTurnIssuer, applyFederationConfig, verifyActaMembership, verifyActaSeal, canSeal, _ringHint: ringHint, _actaCache: actaCache };
 
 // Manejo de cierre limpio. Atendemos SIGINT (Ctrl+C) y SIGTERM: este último es
 // el que manda `systemctl stop/restart`; sin handler, Node lo terminaba pero el
