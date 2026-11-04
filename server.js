@@ -1309,7 +1309,12 @@ function wakeVault(pubkey, sub) {
     const t = setTimeout(() => ctrl.abort(), 10_000);
     fetch(sub.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'wake', ts: now }), signal: ctrl.signal })
         .then((r) => {
-            if (r.status === 404 || r.status === 410) { removePushSubscription(pubkey, WAKE_APP); console.log(`[wake] the vault is gone (${r.status}): wake removed`); }
+            // 403 también es «ya no está»: AWS contesta 403 a la URL de una función que se borró
+            // (no 404), y la propia bóveda lo contesta cuando el secreto de la URL ya no es el
+            // suyo. En los dos casos esa URL no despierta a nadie nunca más, y la bóveda viva
+            // vuelve a registrar la buena en cada sesión. Antes se reintentaba para siempre:
+            // el 2026-11-04 había cuatro pilas borradas sonando cada noche.
+            if (r.status === 403 || r.status === 404 || r.status === 410) { removePushSubscription(pubkey, WAKE_APP); console.log(`[wake] the vault is gone (${r.status}): wake removed`); }
             else if (!r.ok) { wakingUntil.delete(pubkey); console.error(`[wake] the vault did not take the wake: HTTP ${r.status}`); }
             else console.log('[wake] vault woken');
         })

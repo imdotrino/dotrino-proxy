@@ -44,7 +44,7 @@ describe('despertar a una bóveda', () => {
         wakePort = await freePort();
         wakeServer = http.createServer((req, res) => {
             let b = ''; req.on('data', (c) => { b += c; });
-            req.on('end', () => { hits.push({ url: req.url, body: b }); res.writeHead(202); res.end(); });
+            req.on('end', () => { hits.push({ url: req.url, body: b }); res.writeHead(req.url.startsWith('/borrada') ? 403 : 202); res.end(); });
         });
         await new Promise((r) => wakeServer.listen(wakePort, '127.0.0.1', r));
         dir = makeNodeDir('despertar');
@@ -190,6 +190,24 @@ describe('despertar a una bóveda', () => {
         await sleep(400);
         expect(hits.slice(before).map((h) => h.url)).toEqual(['/canal']);
         who.close();
+    }, 30000);
+
+    it('una URL que contesta 403 (la función se borró) se quita y no se vuelve a llamar', async () => {
+        const master = await makeDeviceKey();
+        const comm = makeUser();
+        const acta = await actaWith(master, comm);
+        const v = await connectIdentified(node.url, comm);
+        await register(v, comm, acta, `http://127.0.0.1:${wakePort}/borrada`);
+        v.close();
+        await sleep(200);
+        const sender = await connectIdentified(node.url, makeUser());
+        const before = hits.length;
+        sender.send({ to_publickey: master.publickey, message: 'uno', id: 'b1' });
+        await sleep(700);
+        sender.send({ to_publickey: master.publickey, message: 'dos', id: 'b2' });
+        await sleep(700);
+        expect(hits.slice(before).map((h) => h.url)).toEqual(['/borrada']);
+        sender.close();
     }, 30000);
 
     it('el registro sobrevive a reiniciar el proxio', async () => {
