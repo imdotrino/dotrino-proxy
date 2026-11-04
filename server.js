@@ -1250,19 +1250,36 @@ function prunePushSubscriptions(target, app, keep) {
  * Es una pista para el aviso, no una decisión: quien aprueba lo hace en la consola, con el
  * pedido verificado contra la bóveda. Cualquier otro `ev` no da pista: timbre sin porqué.
  */
+// EL ASUNTO SELLADO (`ring`, vaultd ≥ 0.190.0): la bóveda lo cifra a la llave del teléfono
+// que aprueba, y aquí se pega al timbre TAL CUAL, también al de FCM/APNs. Google y Apple ven
+// un sobre que no pueden abrir; el teléfono lo abre sin red y dice quién pide qué. Este
+// servidor no lo lee ni lo entiende: solo comprueba la forma y el tamaño (FCM admite 4 KB).
+const RING_SEALED_MAX = 2048;
+function sealedRing(m) {
+    const r = m && m.ring;
+    if (!r || typeof r !== 'object' || !r.wrap || !r.envelope || typeof r.wrap !== 'object' || typeof r.envelope !== 'object') return null;
+    const s = JSON.stringify({ wrap: r.wrap, envelope: r.envelope });
+    return s.length <= RING_SEALED_MAX ? s : null;
+}
+
 function ringHint(msgBody) {
     let m = msgBody;
     if (typeof m === 'string') { try { m = JSON.parse(m); } catch (_) { return null; } }
     const b = m && m.type === 'vault.admin.event' ? m.body : null;
     if (!b) return null;
     const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
+    const sealed = sealedRing(m);
+    const plus = sealed ? { sealed } : {};
     if (b.ev === 'approval') {
-        return { why: { ev: 'approval', kind: str(b.kind, 20) || 'read', ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
+        return { ...plus, why: { ev: 'approval', kind: str(b.kind, 20) || 'read', ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
     }
     if (b.ev === 'updated' || b.ev === 'update-needs-root') {
-        return { why: { ev: b.ev, version: str(b.version, 20), from: str(b.from, 20), product: str(b.product, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
+        return { ...plus, why: { ev: b.ev, version: str(b.version, 20), from: str(b.from, 20), product: str(b.product, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
     }
-    return null;
+    if (b.ev === 'delivered') {
+        return { ...plus, why: { ev: 'delivered', kind: str(b.kind, 20), ns: str(b.ns, 64), label: str(b.label, 64), deviceId: str(b.deviceId, 16) } };
+    }
+    return sealed ? plus : null;
 }
 
 // ----- Despertar a una bóveda que no vive conectada -----------------------
@@ -1350,7 +1367,8 @@ function ringOne(pubkey, subApp, sub, extra) {
     if (sub.kind === 'wake') return wakeVault(pubkey, sub);
     const ring = { type: 'ring', ts: Date.now(), ...(extra || {}) };
     // Lo que sabe del pedido (`why`) SOLO viaja por Web Push, que va cifrado hasta el
-    // navegador. FCM y APNs lo leen Google y Apple: a ellos, el timbre vacío de siempre.
+    // navegador. FCM y APNs lo leen Google y Apple: a ellos, el timbre vacío de siempre, más
+    // el asunto SELLADO al teléfono (`sealed`), que no pueden abrir.
     const bare = { ...ring }; delete bare.why;
     // App nativa (FCM): la suscripción es `{ kind:'fcm', token }`, no una PushSubscription.
     if (sub.kind === 'fcm') {
@@ -2187,7 +2205,7 @@ wss.on('connection', (ws, req) => {
         // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
         protocol: 2,
         speaks: [1, 2],
-        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake', 'wake-self', 'acta-cache'],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake', 'wake-self', 'acta-cache', 'ring-sealed'],
         timestamp: new Date().toISOString()
     }));
     

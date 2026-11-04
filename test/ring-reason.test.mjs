@@ -44,4 +44,22 @@ describe('ringHint', () => {
     expect(r.why.ns.length).toBe(64)
     expect(r.why.label.length).toBe(64)
   })
+  it('«delivered»: un aparato desatendido se llevó claves; dice qué cajón y quién', () => {
+    const body = { ev: 'delivered', id: 'x', kind: 'passwords', ns: 'passwords', deviceId: 'AB12-CD34', label: 'servidor', ts: 1 }
+    expect(_ringHint({ type: 'vault.admin.event', body }))
+      .toEqual({ why: { ev: 'delivered', kind: 'passwords', ns: 'passwords', label: 'servidor', deviceId: 'AB12-CD34' } })
+  })
+  it('el asunto SELLADO pasa tal cual (también a FCM/APNs); malformado o grande, no pasa', () => {
+    const ring = { wrap: { epk: 'a', iv: 'b', ct: 'c' }, envelope: { gen: 0, iv: 'd', ct: 'e' } }
+    const body = { ev: 'approval', id: 'x', ns: 'proxy', kind: 'read', deviceId: '904C-1002', label: 'proxy1' }
+    const r = _ringHint({ type: 'vault.admin.event', body, ring })
+    expect(JSON.parse(r.sealed)).toEqual(ring)
+    expect(r.why.ns).toBe('proxy')
+    // Un aviso que el proxio no sabe contar, pero que trae asunto: va solo el asunto.
+    expect(_ringHint({ type: 'vault.admin.event', body: { ev: 'otro' }, ring })).toEqual({ sealed: JSON.stringify(ring) })
+    expect(_ringHint({ type: 'vault.admin.event', body, ring: { wrap: 'x', envelope: {} } }).sealed).toBeUndefined()
+    expect(_ringHint({ type: 'vault.admin.event', body, ring: { wrap: { ct: 'x'.repeat(3000) }, envelope: {} } }).sealed).toBeUndefined()
+    // Fuera de un aviso de la bóveda, nada.
+    expect(_ringHint({ type: 'otro', ring })).toBe(null)
+  })
 })
