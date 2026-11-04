@@ -2187,7 +2187,7 @@ wss.on('connection', (ws, req) => {
         // el 1 se sigue hablando entero, así que un cliente viejo no nota nada.
         protocol: 2,
         speaks: [1, 2],
-        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake', 'wake-self'],
+        caps: ['channels', 'pubkey-routing', 'offline-queue', 'pairing-codes', 'push', 'push-prune', 'turn', 'encpub', 'binary', 'wake', 'wake-self', 'acta-cache'],
         timestamp: new Date().toISOString()
     }));
     
