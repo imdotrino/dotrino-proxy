@@ -18,13 +18,17 @@
 
 const RESEND_API = 'https://api.resend.com/emails';
 
+/**
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
 function alertsConfigured(env = process.env) {
     return Boolean(env.ALERT_RESEND_API_KEY && env.ALERT_EMAIL_TO && env.ALERT_EMAIL_FROM);
 }
 
 /**
  * @param {{ subject: string, text: string }} alert
- * @param {{ fetchImpl?: Function, env?: object, log?: Function }} [opts]
+ * @param {{ fetchImpl?: typeof fetch | null, env?: NodeJS.ProcessEnv, log?: (msg: string) => void }} [opts]
  * @returns {Promise<{ sent: boolean, reason?: string }>}
  */
 async function sendAlert({ subject, text }, opts = {}) {
@@ -48,14 +52,20 @@ async function sendAlert({ subject, text }, opts = {}) {
         }
         return { sent: true };
     } catch (e) {
-        log(`[alert] NOT sent by email: ${e.message}`);
+        log(`[alert] NOT sent by email: ${/** @type {Error} */ (e).message}`);
         return { sent: false, reason: 'network' };
     }
 }
 
+/** @param {number} bytes */
 const gb = (bytes) => (bytes / 1e9).toFixed(2);
 
-/** El texto de los dos avisos del tope del TURN (`turnUsage.js`). */
+/**
+ * El texto de los dos avisos del tope del TURN (`turnUsage.js`).
+ * @param {import('./types/index.js').TurnUsageEvent} ev
+ * @param {string} [node]
+ * @returns {{ subject: string, text: string }}
+ */
 function turnAlertText(ev, node = process.env.PROXY_PUBLIC_URL || 'proxy') {
     if (ev.kind === 'turn-daily-cap') {
         return {

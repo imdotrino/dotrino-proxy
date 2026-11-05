@@ -28,25 +28,31 @@ const ANNOUNCE_TS_TOLERANCE_MS = 5 * 60 * 1000;
 class PeerRegistry {
     /**
      * @param {Object} opts
-     * @param {string[]} opts.urls          URLs de peers (PROXY_PEERS)
-     * @param {Object}   opts.identity      identidad de ESTE nodo (nodeIdentity)
-     * @param {Object}   opts.persist       módulo de persistencia (tabla peer_nodes)
-     * @param {Function} [opts.log]
-     * @param {Function} [opts.fetchImpl]   inyectable para tests
+     * @param {string[]} [opts.urls]        URLs de peers (PROXY_PEERS)
+     * @param {import('./types/index.js').NodeIdentity | null} [opts.identity]  identidad de ESTE nodo (nodeIdentity)
+     * @param {Pick<typeof import('./persistence.js'), 'loadPeerNodes' | 'pinPeerNode' | 'touchPeerNode' | 'deletePeerNode'>} opts.persist  módulo de persistencia (tabla peer_nodes)
+     * @param {(...args: unknown[]) => void} [opts.log]
+     * @param {typeof fetch} [opts.fetchImpl]   inyectable para tests
      */
-    constructor({ urls = [], identity = null, persist, log = console.log, fetchImpl = fetch } = {}) {
+    constructor({ urls = [], identity = null, persist, log = console.log, fetchImpl = fetch }) {
         this.urls = urls;
         this.identity = identity;
         this.persist = persist;
         this.log = log;
         this.fetchImpl = fetchImpl;
+        /** @type {Map<string, import('./types/index.js').Peer>} */
         this.byUrl = new Map();     // url    -> {url, pubkey, nodeId}
+        /** @type {Map<string, import('./types/index.js').Peer>} */
         this.byPubkey = new Map();  // pubkey -> {url, pubkey, nodeId}
+        /** @type {Map<string, import('./types/index.js').Peer>} */
         this.byId = new Map();      // nodeId -> {url, pubkey, nodeId}
         // hint (2 chars) -> Set de peers. Es un Set y no un valor porque el
         // filtro PUEDE repetirse entre nodos: no es un reclamo exclusivo.
+        /** @type {Map<string, Set<import('./types/index.js').Peer>>} */
         this.byHint = new Map();
+        /** @type {ReturnType<typeof setTimeout> | null} */
         this.refreshTimer = null;
+        this._stopped = false;
     }
 
     /**
@@ -54,6 +60,7 @@ class PeerRegistry {
      * descifrar el archivo del vault, que es asíncrono (ver `nodeIdentity.js`).
      * Se fija antes de arrancar la federación, nunca en caliente.
      */
+    /** @param {import('./types/index.js').NodeIdentity | null} identity */
     setIdentity(identity) { this.identity = identity; }
 
     /**
@@ -65,6 +72,7 @@ class PeerRegistry {
      * tras un reinicio, porque el pineo vive en SQLite—. Dejar de confiar en un
      * nodo es `deletePeerNode`, que es una decisión aparte y explícita.
      */
+    /** @param {string[]} [urls] */
     setUrls(urls = []) { this.urls = urls; }
 
     /**
@@ -73,7 +81,9 @@ class PeerRegistry {
      * se declaraba en vez de derivarse, y aceptarlas sería seguir confiando en
      * una declaración. Se vuelven a pinear solas en el próximo descubrimiento.
      */
+    /** @returns {number} cuántos pines quedaron */
     load() {
+        /** @type {import('./types/index.js').PeerNodeRow[]} */
         let rows = [];
         try { rows = this.persist.loadPeerNodes(); } catch (_) { rows = []; }
         let ok = 0;
@@ -89,22 +99,30 @@ class PeerRegistry {
         return ok;
     }
 
+    /** @param {import('./types/index.js').Peer} peer */
     _index(peer) {
         this.byUrl.set(peer.url, peer);
         this.byPubkey.set(peer.pubkey, peer);
         this.byId.set(peer.nodeId, peer);
         const h = hintOf(peer.nodeId);
         if (!this.byHint.has(h)) this.byHint.set(h, new Set());
-        this.byHint.get(h).add(peer);
+        /** @type {Set<import('./types/index.js').Peer>} */ (this.byHint.get(h)).add(peer);
     }
 
+    /** @param {string} url */
     get(url) { return this.byUrl.get(url) || null; }
+    /** @param {string} pubkey */
     byNodePubkey(pubkey) { return this.byPubkey.get(pubkey) || null; }
+    /** @param {string} nodeId */
     byNodeId(nodeId) { return this.byId.get(nodeId) || null; }
 
     /**
      * Peers cuyo id EMPIEZA con ese filtro. Puede devolver más de uno: el filtro
      * no es exclusivo. En la práctica es uno (con 100 nodos, 1,08 de media).
+     */
+    /**
+     * @param {string} hint
+     * @returns {import('./types/index.js').Peer[]}
      */
     candidatesByHint(hint) {
         const set = this.byHint.get(hint);
@@ -113,9 +131,14 @@ class PeerRegistry {
 
     known() { return Array.from(this.byUrl.values()); }
 
-    /** El anuncio autofirmado de ESTE nodo (lo que sirve GET /node). */
+    /**
+     * El anuncio autofirmado de ESTE nodo (lo que sirve GET /node).
+     * @param {string | null | undefined} selfUrl
+     * @returns {import('./types/index.js').NodeAnnouncement | null}
+     */
     selfAnnouncement(selfUrl) {
         if (!this.identity) return null;
+        /** @type {import('./types/index.js').NodeAnnouncement['body']} */
         const body = {
             v: 1,
             nodeId: this.identity.nodeId,
@@ -130,6 +153,11 @@ class PeerRegistry {
     /**
      * Valida un anuncio recibido: firmado por la pubkey que declara, fresco y con
      * id bien formado Y derivado de su llave. Devuelve {url,pubkey,nodeId} o null.
+     */
+    /**
+     * @param {any} announcement  JSON de otro nodo, sin validar
+     * @param {string} url
+     * @returns {import('./types/index.js').Peer | null}
      */
     static parseAnnouncement(announcement, url) {
         const body = announcement && announcement.body;
@@ -152,6 +180,10 @@ class PeerRegistry {
      * Incorpora un peer al registro. Devuelve
      * {status:'pinned'|'known'|'conflict', peer?, reason?}.
      */
+    /**
+     * @param {import('./types/index.js').Peer} peer
+     * @returns {import('./types/index.js').AdoptResult}
+     */
     adopt(peer) {
         const existing = this.byUrl.get(peer.url);
         if (existing) {
@@ -173,13 +205,17 @@ class PeerRegistry {
             return { status: 'conflict', reason: `peer ${peer.url} announces MY own key` };
         }
         try { this.persist.pinPeerNode(peer.url, peer.pubkey, peer.nodeId, Date.now()); } catch (e) {
-            return { status: 'conflict', reason: `could not pin ${peer.url}: ${e.message}` };
+            return { status: 'conflict', reason: `could not pin ${peer.url}: ${/** @type {Error} */ (e).message}` };
         }
         this._index(peer);
         return { status: 'pinned', peer };
     }
 
-    /** Baja el anuncio de un peer y lo adopta. */
+    /**
+     * Baja el anuncio de un peer y lo adopta.
+     * @param {string} url
+     * @returns {Promise<import('./types/index.js').AdoptResult>}
+     */
     async discover(url) {
         let res;
         const ctrl = new AbortController();
@@ -187,7 +223,7 @@ class PeerRegistry {
         try {
             res = await this.fetchImpl(`${url}/node`, { signal: ctrl.signal });
         } catch (e) {
-            return { status: 'unreachable', reason: e.message };
+            return { status: 'unreachable', reason: /** @type {Error} */ (e).message };
         } finally { clearTimeout(t); }
         if (!res.ok) return { status: 'unreachable', reason: `HTTP ${res.status}` };
         let announcement;
@@ -197,8 +233,12 @@ class PeerRegistry {
         return this.adopt(peer);
     }
 
-    /** Descubre todos los peers configurados (arranque y refresco periódico). */
+    /**
+     * Descubre todos los peers configurados (arranque y refresco periódico).
+     * @returns {Promise<Array<{ url: string } & import('./types/index.js').AdoptResult>>}
+     */
     async discoverAll() {
+        /** @type {Array<{ url: string } & import('./types/index.js').AdoptResult>} */
         const out = [];
         for (const url of this.urls) {
             const r = await this.discover(url);
@@ -226,6 +266,7 @@ class PeerRegistry {
      * suyos ("nodo emisor desconocido"). La federación quedaba funcionando en un
      * solo sentido, que es peor que no funcionar, porque no se nota.
      */
+    /** @param {{ fastMs?: number, slowMs?: number }} [opts] */
     startRefresh({ fastMs = 15 * 1000, slowMs = 10 * 60 * 1000 } = {}) {
         this.stopRefresh();
         const tick = async () => {

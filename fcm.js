@@ -12,8 +12,15 @@
 const crypto = require('node:crypto');
 
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+/** @param {string | Buffer} buf */
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
 
+/**
+ * Cuenta de servicio de Firebase (lo que se usa del JSON).
+ * @typedef {{ client_email: string, private_key: string, project_id: string, token_uri?: string }} ServiceAccount
+ */
+
+/** @returns {ServiceAccount | null} */
 function loadServiceAccount() {
     const raw = process.env.FCM_SERVICE_ACCOUNT_B64 || '';
     if (!raw) return null;
@@ -24,7 +31,12 @@ function loadServiceAccount() {
     } catch (_) { return null; }
 }
 
+/** @type {{ token: string | null, exp: number }} */
 let cached = { token: null, exp: 0 };
+/**
+ * @param {ServiceAccount} sa
+ * @returns {Promise<string | null>}
+ */
 async function accessToken(sa) {
     if (cached.token && Date.now() < cached.exp - 60 * 1000) return cached.token;
     const now = Math.floor(Date.now() / 1000);
@@ -46,10 +58,16 @@ async function accessToken(sa) {
  * Manda el timbre a un token de FCM. Devuelve `{ ok }` o `{ ok:false, gone:true }` si el
  * token ya no existe (la app se desinstaló): el llamante borra la suscripción.
  */
+/**
+ * @param {string} token
+ * @param {Record<string, unknown> | null | undefined} payload
+ * @returns {Promise<{ ok: boolean, disabled?: boolean, gone?: boolean, status?: number, body?: string }>}
+ */
 async function ringFcm(token, payload) {
     const sa = loadServiceAccount();
     if (!sa) return { ok: false, disabled: true };
     const at = await accessToken(sa);
+    /** @type {Record<string, string>} */
     const data = {};
     for (const [k, v] of Object.entries(payload || {})) data[k] = String(v); // FCM: solo strings
     const res = await fetch(`https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`, {

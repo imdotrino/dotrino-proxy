@@ -48,6 +48,7 @@ const ALPHABET = '123456789ACDEFHJKMNOPQRTUVWXY';
  * Lo que se ACEPTA a la entrada y a qué se traduce. Ninguna de estas claves
  * está en ALPHABET — si estuviera, traducirla rompería códigos legítimos.
  */
+/** @type {Record<string, string>} */
 const CONFUSABLES = {
     I: '1', L: '1',   // palo vertical
     S: '5',
@@ -60,6 +61,10 @@ const CONFUSABLES = {
 /**
  * Normaliza lo que teclea o dicta una persona: mayúsculas, sin espacios ni
  * guiones (se muestran agrupados), y con los confundibles traducidos.
+ */
+/**
+ * @param {unknown} raw
+ * @returns {string | null}
  */
 function normalize(raw) {
     if (typeof raw !== 'string') return null;
@@ -75,6 +80,10 @@ function normalize(raw) {
 }
 
 /** ¿Son todos símbolos emitibles? (usar SIEMPRE sobre el texto ya normalizado) */
+/**
+ * @param {unknown} s
+ * @returns {boolean}
+ */
 function isEmittable(s) {
     return typeof s === 'string' && s.length > 0 && [...s].every((c) => ALPHABET.includes(c));
 }
@@ -91,6 +100,10 @@ function isEmittable(s) {
 const UGLY_WORDS = ['PUTA', 'PUTO', 'TETA', 'PENE', 'CACA', 'PEDO', 'MOCO', 'MEAR', 'KKK'];
 
 /** ¿El código sorteado contiene algo que da vergüenza dictar? */
+/**
+ * @param {unknown} code
+ * @returns {boolean}
+ */
 function isUnfortunate(code) {
     const up = String(code || '').toUpperCase();
     return UGLY_WORDS.some((w) => up.includes(w));

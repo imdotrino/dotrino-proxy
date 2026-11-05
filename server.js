@@ -10,16 +10,19 @@ const usageStats = createUsageStats();
 const crypto = require('crypto');
 
 // Configuración
-const PORT = parseInt(process.env.PORT) || 4001;
+const PORT = parseInt(process.env.PORT || '') || 4001;
 
 // Almacenar conexiones activas: token -> {ws, ip, channel, connectedAt}
+/** @type {Map<string, import('./types/index.js').Connection>} */
 const activeConnections = new Map();
 
 // Almacenar pares de conexión que se han comunicado
 // Formato: "token1:token2" (tokens ordenados alfabéticamente)
+/** @type {Set<string>} */
 const connectionPairs = new Set();
 
 // Almacenar canales públicos: channel -> [{token, publishedAt}, ...]
+/** @type {Map<string, import('./types/index.js').ChannelEntry[]>} */
 const publicChannels = new Map();
 const MAX_CHANNEL_ENTRIES = 100;
 const CHANNEL_ENTRY_EXPIRY_MS = 20 * 60 * 1000; // 20 minutos
@@ -28,6 +31,7 @@ const CHANNEL_ENTRY_EXPIRY_MS = 20 * 60 * 1000; // 20 minutos
 // joined/left/disconnected del canal SIN figurar como miembros (no aparecen en
 // list()). Pensado para el lobby: ver altas/bajas de salas en vivo sin tener que
 // publicarse como una sala fantasma. (No persistente: se limpia al desconectar.)
+/** @type {Map<string, Set<string>>} */
 const channelWatchers = new Map();
 
 // ----- Identidad opt-in y cola offline ----------------------------------
@@ -46,8 +50,11 @@ const channelWatchers = new Map();
 // los mensajes online se hacen fan-out a todos los tokens activos.
 // La cola offline sigue siendo 1 sola por pubkey: el primer cliente que
 // identifique drena la cola completa y se borra (los demás no la verán).
+/** @type {Map<string, Set<string>>} */
 const pubkeyToTokens = new Map();   // publickey JWK string -> Set<token>
+/** @type {Map<string, string>} */
 const tokenToPubkey = new Map();    // token -> publickey JWK string (1:1)
+/** @type {Map<string, Set<string>>} */
 const tokenToExtraPubkeys = new Map(); // token -> Set<pubkey> (bindings DELEGADOS por cert, p.ej. la maestra M)
 
 // Persistencia durable (SQLite nativo). Solo lo no-efímero: la cola offline y
@@ -80,6 +87,7 @@ const IDENTIFY_TS_TOLERANCE_MS = 5 * 60 * 1000;       // ±5 min
  */
 const PROXY_AUDIENCE = String(process.env.PROXY_AUDIENCE || '').trim().replace(/\/+$/, '') || null;
 const PROXY_AUDIENCE_ENFORCE = process.env.PROXY_AUDIENCE_ENFORCE === '1';
+/** @type {Map<string, number>} */
 const identifyWithoutAudience = new Map();   // pubkey → cuántas veces (para saber a quién le falta)
 
 // --- Federación s2s (opcional): reenviar mensajes por pubkey a proxies peer. ---
@@ -93,7 +101,9 @@ const identifyWithoutAudience = new Map();   // pubkey → cuántas veces (para 
 // otra—. Ahora la federación se levanta cuando llega el bundle (`applyFederationConfig`),
 // y el `.env` deja de ser necesario para esto: si está, arranca antes; si no, arranca
 // al primer bundle.
+/** @param {unknown} v @returns {string[]} */
 const parsePeerList = (v) => String(v || '').split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
+/** @param {unknown} v @returns {string | null} */
 const parsePublicUrl = (v) => String(v || '').trim().replace(/\/+$/, '') || null;
 let PROXY_PEERS = parsePeerList(process.env.PROXY_PEERS);
 let PROXY_PUBLIC_URL = parsePublicUrl(process.env.PROXY_PUBLIC_URL);
@@ -109,7 +119,9 @@ const { serviceDir } = require('./vaultSecrets');
 // La identidad se carga en `initNodeIdentity()`, no aquí: leer el archivo del
 // vault es asíncrono (viene cifrado en reposo y lo descifra su lib). Hasta que
 // eso ocurra el nodo es "sin identidad", que es un estado que ya sabe manejar.
+/** @type {import('./types/index.js').NodeIdentity | null} */
 let nodeIdentity = null;
+/** @type {Promise<import('./types/index.js').NodeIdentity | null> | null} */
 let nodeIdentityReady = null;
 const peerRegistry = new PeerRegistry({
     urls: PROXY_PEERS, identity: null, persist, log: (...a) => console.log(...a)
@@ -131,7 +143,7 @@ const mesh = new Mesh({
             if (typeof toPubkey !== 'string' || message === undefined) return;
             deliverFederated(toPubkey, wireBody.fromJson(message), fromPubkey || null, queuedAt, expiresAt, ephemeral === true, quiet === true, appOf(app))
                 .catch((e) => console.warn('[mesh] federated delivery failed:', e.message));
-        } catch (e) { console.warn('[mesh] federated delivery failed:', e.message); }
+        } catch (e) { console.warn('[mesh] federated delivery failed:', /** @type {Error} */ (e).message); }
     },
     // Un peer nos manda un mensaje dirigido a una INSTANCIA nuestra.
     onRelay: (payload, link) => {
@@ -144,7 +156,7 @@ const mesh = new Mesh({
                 link.send('relay-failed', { rid: payload.rid, toInstance: payload.toInstance }, { retain: false });
             }
         }
-        catch (e) { console.warn('[mesh] relay failed:', e.message); }
+        catch (e) { console.warn('[mesh] relay failed:', /** @type {Error} */ (e).message); }
     },
     // El nodo dueño dice que la instancia a la que relayamos ya no existe.
     onRelayFailed: (payload) => {
@@ -156,12 +168,12 @@ const mesh = new Mesh({
             const response = { type: 'message_sent', sent: 0, total: 1, failed: [pending.toInstance] };
             applyMessageIds(response, pending.message);
             try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
-        } catch (e) { console.warn('[mesh] relay-failed failed:', e.message); }
+        } catch (e) { console.warn('[mesh] relay-failed failed:', /** @type {Error} */ (e).message); }
     },
     // Un peer nos avisa que una instancia suya, con la que teníamos par, se fue.
     onPeerGone: (payload) => {
         try { handleRemotePeerGone(payload); }
-        catch (e) { console.warn('[mesh] peer-gone failed:', e.message); }
+        catch (e) { console.warn('[mesh] peer-gone failed:', /** @type {Error} */ (e).message); }
     },
     // Un peer nos pide canjear una cita que emitimos NOSOTROS.
     onPairRedeem: (payload, link) => {
@@ -172,12 +184,12 @@ const mesh = new Mesh({
                 ? { rid, ok: false, code: r.code, error: r.error }
                 : { rid, ok: true, instance: r.instance, publickey: r.pubkey || null },
             { retain: false });
-        } catch (e) { console.warn('[mesh] pair-redeem failed:', e.message); }
+        } catch (e) { console.warn('[mesh] pair-redeem failed:', /** @type {Error} */ (e).message); }
     },
     // Un peer opera sobre un canal del que NOSOTROS somos dueños.
     onChanOp: (payload, link) => {
         try { handleRemoteChannelOp(payload, link); }
-        catch (e) { console.warn('[mesh] chan-op failed:', e.message); }
+        catch (e) { console.warn('[mesh] chan-op failed:', /** @type {Error} */ (e).message); }
     },
     // El nodo dueño contesta la operación de canal que le pedimos.
     onChanResult: (payload) => {
@@ -189,7 +201,7 @@ const mesh = new Mesh({
             const response = { ...payload.frame };
             applyMessageIds(response, pending.message);
             try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
-        } catch (e) { console.warn('[mesh] chan-result failed:', e.message); }
+        } catch (e) { console.warn('[mesh] chan-result failed:', /** @type {Error} */ (e).message); }
     },
     // Un peer nos reparte un anuncio de llave de cifrado. Se verifica igual que si
     // viniera de un cliente: la malla no da confianza, la firma sí.
@@ -197,12 +209,12 @@ const mesh = new Mesh({
         try {
             const { data, signature } = payload || {};
             storeEncPub(data, signature);
-        } catch (e) { console.warn('[mesh] encpub failed:', e.message); }
+        } catch (e) { console.warn('[mesh] encpub failed:', /** @type {Error} */ (e).message); }
     },
     // El nodo dueño nos manda un evento de canal para una conexión nuestra.
     onChanEvent: (payload) => {
         try { deliverChannelEvent(payload); }
-        catch (e) { console.warn('[mesh] chan-event failed:', e.message); }
+        catch (e) { console.warn('[mesh] chan-event failed:', /** @type {Error} */ (e).message); }
     },
     // Un candidato contesta el canje que le pedimos. Se ACUMULAN las respuestas
     // afirmativas: la decisión se toma con todas, nunca con la primera.
@@ -215,8 +227,9 @@ const mesh = new Mesh({
             if (payload.ok && payload.instance) {
                 pending.replies.push({ instance: payload.instance, pubkey: payload.publickey || null });
             }
-            if (pending.received >= pending.expected) pending.resolve();
-        } catch (e) { console.warn('[mesh] pair-result failed:', e.message); }
+            // `resolve` se pone al crear el pendiente, antes de guardarlo en el mapa.
+            if (pending.received >= pending.expected) /** @type {() => void} */ (pending.resolve)();
+        } catch (e) { console.warn('[mesh] pair-result failed:', /** @type {Error} */ (e).message); }
     }
 });
 
@@ -233,7 +246,7 @@ async function initNodeIdentity() {
     if (nodeIdentityReady) return nodeIdentityReady;
     nodeIdentityReady = (async () => {
         try { nodeIdentity = await nodeIdentityLib.loadNodeIdentity(serviceDir()); }
-        catch (e) { console.error('[fed] invalid node identity:', e.message); nodeIdentity = null; }
+        catch (e) { console.error('[fed] invalid node identity:', /** @type {Error} */ (e).message); nodeIdentity = null; }
         // Las instancias que emite este nodo llevan su id delante: es lo que las
         // hace únicas en todo el ecosistema y ruteables sin preguntarle a nadie.
         // El id se DERIVA de la llave del nodo, así que nadie puede usar el ajeno.
@@ -341,22 +354,30 @@ const pairingCodes = new PairingCodes();
 // Mensajes relayados a una instancia de otro nodo, esperando por si el dueño dice que ya
 // no existe: rid -> { ws, message, toInstance, timer }. Si en 15 s no dice nada, llegó.
 const wireBody = require('./body');
+/** @type {Map<string, import('./types/index.js').PendingRelay>} */
 const pendingRelays = new Map();
 let relaySeq = 0;
 
 // Canjes de cita esperando respuesta del nodo dueño: id -> {ws, message, timer}
+/** @type {Map<string, import('./types/index.js').PendingRedeem>} */
 const pendingRedeems = new Map();
 let redeemSeq = 0;
 
 // Instancias REMOTAS con las que alguna conexión local tiene par:
 // instance remota -> pubkey del nodo dueño. Sirve para avisar la baja al nodo
 // correcto cuando se corta de este lado, sin tener que recorrer la malla entera.
+/** @type {Map<string, string>} */
 const remoteInstances = new Map();
 
 /**
  * Entrega un mensaje que un peer relayó hacia una instancia NUESTRA.
  * Es la contraparte del ruteo por prefijo: el nodo dueño es el único que puede
  * resolver la instancia, y también el que registra el par de este lado.
+ */
+/**
+ * @param {any} payload  JSON de otro nodo
+ * @param {import('./types/index.js').MeshReplyChannel} link
+ * @returns {{ failed: true } | { delivered: true, failed?: undefined }}
  */
 function deliverRelayed(payload, link) {
     const { toInstance, fromInstance, fromPubkey, message } = payload || {};
@@ -382,6 +403,7 @@ function deliverRelayed(payload, link) {
  * mostrando al otro conectado, WebRTC no cerraba su peer y el lobby no liberaba
  * el asiento.
  */
+/** @param {any} payload  JSON de otro nodo */
 function handleRemotePeerGone(payload) {
     const gone = payload && payload.instance;
     if (typeof gone !== 'string') return;
@@ -393,8 +415,13 @@ function handleRemotePeerGone(payload) {
  * Al cerrarse una conexión local, avisa a los nodos que tienen instancias
  * pareadas con ella. Un aviso por nodo, no uno por par.
  */
+/**
+ * @param {string} instance
+ * @returns {number} a cuántos nodos se avisó
+ */
 function notifyRemotePeersOfDisconnect(instance) {
     if (!mesh.hasLinks()) return 0;
+    /** @type {Set<string>} */
     const nodes = new Set();
     for (const pairKey of connectionPairs) {
         const [t1, t2] = pairKey.split(':');
@@ -410,6 +437,10 @@ function notifyRemotePeersOfDisconnect(instance) {
 }
 
 /** ¿A qué nodo pertenece esta instancia? null = a este (o no se sabe). */
+/**
+ * @param {unknown} instance
+ * @returns {import('./types/index.js').Peer | null}
+ */
 function ownerNodeOf(instance) {
     const L = nodeIdentityLib.NODE_ID_LEN;
     if (!nodeIdentity || typeof instance !== 'string' || instance.length <= L) return null;
@@ -434,6 +465,10 @@ function ownerNodeOf(instance) {
  * Un canal SIN prefijo es local, como siempre.
  * @returns {{owner:Object|null, local:boolean, known:boolean}}
  */
+/**
+ * @param {unknown} name
+ * @returns {import('./types/index.js').ChannelHome}
+ */
 function channelOwnerOf(name) {
     const L = nodeIdentityLib.NODE_ID_LEN;
     if (typeof name !== 'string') return { owner: null, local: true, known: true };
@@ -443,10 +478,11 @@ function channelOwnerOf(name) {
     if (!nodeIdentityLib.isValidNodeId(id)) return { owner: null, local: true, known: true };
     if (nodeIdentity && id === nodeIdentity.nodeId) return { owner: null, local: true, known: true };
     const peer = peerRegistry.byNodeId(id);
-    return { owner: peer, local: false, known: !!peer };
+    return peer ? { owner: peer, local: false, known: true } : { owner: null, local: false, known: false };
 }
 
 // Operaciones de canal esperando respuesta del nodo dueño: rid -> {ws, message, timer}
+/** @type {Map<string, import('./types/index.js').PendingChanOp>} */
 const pendingChanOps = new Map();
 let chanOpSeq = 0;
 
@@ -454,6 +490,14 @@ let chanOpSeq = 0;
  * Manda una operación de canal al nodo dueño y contesta al cliente cuando llega
  * la respuesta. Si el enlace no está o el dueño no contesta, se responde error:
  * quedarse callado dejaría al cliente esperando para siempre.
+ */
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ * @param {import('./types/index.js').Peer} owner
+ * @param {string} op
+ * @param {Record<string, unknown>} payload
+ * @returns {boolean}
  */
 function forwardChannelOp(ws, message, owner, op, payload) {
     const rid = `c${++chanOpSeq}`;
@@ -484,9 +528,13 @@ function forwardChannelOp(ws, message, owner, op, payload) {
  * nodo, así que se guarda tal cual: para el resto de los miembros es un miembro
  * más, y escribirle funciona igual que si fuera local.
  */
+/**
+ * @param {any} payload  JSON de otro nodo
+ * @param {import('./types/index.js').MeshReplyChannel} link
+ */
 function handleRemoteChannelOp(payload, link) {
     const { rid, op, channel, instance } = payload || {};
-    const reply = (frame) => link.send('chan-result', { rid, frame }, { retain: false });
+    const reply = (/** @type {Record<string, unknown>} */ frame) => link.send('chan-result', { rid, frame }, { retain: false });
     const timestamp = new Date().toISOString();
 
     if (op === 'publish') {
@@ -524,6 +572,7 @@ function handleRemoteChannelOp(payload, link) {
 }
 
 /** Entrega a una conexión local un frame de canal que mandó el nodo dueño. */
+/** @param {any} payload  JSON de otro nodo */
 function deliverChannelEvent(payload) {
     const { toInstance, frame } = payload || {};
     if (typeof toInstance !== 'string' || !frame) return;
@@ -537,6 +586,11 @@ function deliverChannelEvent(payload) {
  * otro nodo, va por la malla. Es lo que hace que un miembro remoto se entere de
  * las altas y bajas: sin esto, el que está en otro proxio nunca recibía
  * `joined`/`left`/`disconnected` y se le quedaba la sala congelada.
+ */
+/**
+ * @param {string} instance
+ * @param {Record<string, unknown>} frame
+ * @returns {boolean}
  */
 function sendChannelFrameTo(instance, frame) {
     const conn = activeConnections.get(instance);
@@ -568,11 +622,17 @@ const MAX_ENCPUB_LOOKUP = Number(process.env.PROXY_MAX_ENCPUB_LOOKUP || 32);
 const ENCPUB_FUTURE_TOLERANCE_MS = IDENTIFY_TS_TOLERANCE_MS;
 
 /** pubkey -> { data, signature, ts }. Working set en RAM sobre la tabla. */
+/** @type {Map<string, import('./types/index.js').EncPubEntry>} */
 const encPubs = new Map();
 
 /**
  * ¿Es un anuncio válido, y lo firmó quien dice? Misma verificación que hace el cliente,
  * porque un anuncio entra por dos puertas: un cliente suyo o un peer de la malla.
+ */
+/**
+ * @param {any} data  el anuncio, sin validar
+ * @param {unknown} signature
+ * @returns {data is import('./types/index.js').EncPubStatement}
  */
 function verifyEncPubStatement(data, signature) {
     if (!data || typeof signature !== 'string') return false;
@@ -595,15 +655,20 @@ function verifyEncPubStatement(data, signature) {
  * Guarda un anuncio si es válido y más nuevo que el que había.
  * @returns {boolean} si quedó guardado (sirve para no reenviar por la malla lo repetido)
  */
+/**
+ * @param {unknown} data
+ * @param {unknown} signature
+ * @returns {boolean} si se guardó (es nuevo y vale)
+ */
 function storeEncPub(data, signature) {
-    if (!verifyEncPubStatement(data, signature)) return false;
+    if (typeof signature !== 'string' || !verifyEncPubStatement(data, signature)) return false;
     const prev = encPubs.get(data.publickey);
     // NUNCA HACIA ATRÁS: sin esto, reenviar un anuncio viejo devolvería a alguien a una
     // llave que ya no usa, y sus mensajes se volverían ilegibles sin que nadie tocara nada.
     if (prev && prev.ts >= data.ts) return false;
     encPubs.set(data.publickey, { data, signature, ts: data.ts });
     try { persist.upsertEncPub(data.publickey, JSON.stringify(data), signature, data.ts, Date.now()); }
-    catch (e) { console.warn('[encpub] could not persist announcement:', e.message); }
+    catch (e) { console.warn('[encpub] could not persist announcement:', /** @type {Error} */ (e).message); }
     return true;
 }
 
@@ -616,6 +681,7 @@ for (const row of persist.loadEncPubs(Date.now() - ENCPUB_TTL_MS)) {
 
 // "Soy el home de estas pubkeys" (identificaron acá). Set en RAM + respaldo SQLite.
 const homePubkeys = new Set(persist.loadHomes(Date.now() - HOME_TTL_MS));
+/** @param {string} pubkey */
 function registerHome(pubkey) {
     homePubkeys.add(pubkey);
     try { persist.upsertHome(pubkey, Date.now()); } catch (_) {}
@@ -623,6 +689,7 @@ function registerHome(pubkey) {
 // ¿Este proxy es responsable de encolar para pubkey? (identificó acá, o está online acá, o
 // es una bóveda que se despierta desde acá: esa puede dormir más que el TTL del home, y su
 // registro es permanente — se quita solo cuando su URL contesta que ya no existe).
+/** @param {string} pubkey @returns {boolean} */
 function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(pubkey) || !!pushSubscriptions.get(pubkey)?.has(WAKE_APP); }
 
 // Reenvía un mensaje por pubkey a todos los peers (fire-and-forget). El payload
@@ -630,6 +697,16 @@ function isHome(pubkey) { return homePubkeys.has(pubkey) || pubkeyToTokens.has(p
 // El sobre va FIRMADO con la llave de este nodo: el receptor sabe quién se lo
 // mandó sin que haya ningún secreto compartido de por medio. `ts` + `nonce`
 // cierran el replay (una trama capturada no se puede reenviar indefinidamente).
+/**
+ * @param {string} toPubkey
+ * @param {unknown} msgBody
+ * @param {string | null} fromPubkey
+ * @param {number} queuedAt
+ * @param {number} expiresAt
+ * @param {boolean} [ephemeral]
+ * @param {boolean} [quiet]
+ * @param {string | null} [app]
+ */
 function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false, app = null) {
     if (!PROXY_PEERS.length) return;
     if (!nodeIdentity) return;  // sin identidad no se puede firmar → no se federa
@@ -672,6 +749,17 @@ function forwardToPeers(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephe
 
 // Aplica un mensaje federado recibido de un peer: entrega a instancias locales,
 // o encola SÓLO si este proxy es el home del destinatario. NO re-reenvía (sin loops).
+/**
+ * @param {string} toPubkey
+ * @param {unknown} msgBody
+ * @param {string | null} fromPubkey
+ * @param {number | undefined} queuedAt
+ * @param {number | undefined} expiresAt
+ * @param {boolean} [ephemeral]
+ * @param {boolean} [quiet]
+ * @param {string | null} [app]
+ * @returns {Promise<{ delivered: number } | { dropped: true } | { failed: true, code: string } | { queued: true }>}
+ */
 async function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expiresAt, ephemeral = false, quiet = false, app = null) {
     const set = pubkeyToTokens.get(toPubkey);
     let delivered = 0;
@@ -701,8 +789,8 @@ async function deliverFederated(toPubkey, msgBody, fromPubkey, queuedAt, expires
                 expiresAt: expiresAt || (Date.now() + OFFLINE_TTL_MS), bytes, app
             });
         } catch (e) {
-            console.error(`[queue] federated message could not be queued (${e.code || 'error'}): ${e.message}`);
-            return { failed: true, code: e.code || 'queue-unavailable' };
+            console.error(`[queue] federated message could not be queued (${/** @type {NodeJS.ErrnoException} */ (e).code || 'error'}): ${/** @type {Error} */ (e).message}`);
+            return { failed: true, code: /** @type {NodeJS.ErrnoException} */ (e).code || 'queue-unavailable' };
         }
         if (!quiet) ringPush(toPubkey, app, ringHint(msgBody));
         return { queued: true };
@@ -752,14 +840,21 @@ if (offlineQueues.size) {
     console.log(`[persist] offline queue rehydrated: ${offlineQueues.size} pubkey(s), ${totalQueueBytes} bytes`);
 }
 
+/** @param {unknown} m @returns {number} */
 function bytesOfMessage(m) {
     return wireBody.bodyBytes(m);
 }
 
-/** Saca de la cuenta, del disco y del content lo que ya se entregó o se descartó. */
+/**
+ * Saca de la cuenta, del disco y del content lo que ya se entregó o se descartó.
+ * @param {import('./types/index.js').QueuedItem[]} items
+ * @returns {Promise<unknown>}
+ */
 function forgetQueued(items) {
     if (!items.length) return Promise.resolve();
+    /** @type {number[]} */
     const ids = [];
+    /** @type {Promise<void>[]} */
     const removing = [];
     for (const item of items) {
         totalQueueBytes -= item.bytes || 0;
@@ -770,14 +865,17 @@ function forgetQueued(items) {
     return Promise.all(removing);
 }
 
+/** @param {string} pubkey */
 function trimQueueByCaps(pubkey) {
     const q = offlineQueues.get(pubkey);
     if (!q) return;
+    /** @type {import('./types/index.js').QueuedItem[]} */
     const dropped = [];
-    while (q.length > MAX_QUEUE_PER_PUBKEY) dropped.push(q.shift());
+    // `shift()` no da undefined: el bucle mira el largo antes.
+    while (q.length > MAX_QUEUE_PER_PUBKEY) dropped.push(/** @type {import('./types/index.js').QueuedItem} */ (q.shift()));
     let bytes = q.reduce((a, x) => a + (x.bytes || 0), 0);
     while (bytes > MAX_BYTES_PER_PUBKEY && q.length) {
-        const d = q.shift();
+        const d = /** @type {import('./types/index.js').QueuedItem} */ (q.shift());
         bytes -= d.bytes || 0;
         dropped.push(d);
     }
@@ -792,23 +890,33 @@ function evictGloballyIfOverCap() {
     while (totalQueueBytes > MAX_TOTAL_QUEUE_BYTES && dropOldestQueued('offline queue over its total cap')) { /* FIFO */ }
 }
 
-/** Descarta el mensaje encolado más viejo de todas las colas (promesa de su borrado), o false si no queda ninguno. */
+/**
+ * Descarta el mensaje encolado más viejo de todas las colas (promesa de su borrado), o false si no queda ninguno.
+ * @param {string} reason
+ * @returns {Promise<unknown> | false}
+ */
 function dropOldestQueued(reason) {
+    /** @type {string | null} */
     let oldestPk = null;
     let oldestTs = Infinity;
     for (const [pk, q] of offlineQueues) {
         if (q.length && q[0].queuedAt < oldestTs) { oldestTs = q[0].queuedAt; oldestPk = pk; }
     }
     if (!oldestPk) return false;
-    const q = offlineQueues.get(oldestPk);
-    const item = q.shift();
+    // La cola de `oldestPk` existe y no está vacía: de ahí salió.
+    const q = /** @type {import('./types/index.js').QueuedItem[]} */ (offlineQueues.get(oldestPk));
+    const item = /** @type {import('./types/index.js').QueuedItem} */ (q.shift());
     if (q.length === 0) offlineQueues.delete(oldestPk);
     console.warn(`[queue] ${reason}: dropped the oldest queued message (${new Date(item.queuedAt).toISOString()})`);
     // Devuelve el borrado en el node, para que quien hace sitio pueda esperarlo.
     return forgetQueued([item]);
 }
 
-/** Mete `items` en la cola de `pubkey` respetando el orden de llegada. */
+/**
+ * Mete `items` en la cola de `pubkey` respetando el orden de llegada.
+ * @param {string} pubkey
+ * @param {import('./types/index.js').QueuedItem[]} items
+ */
 function placeQueued(pubkey, items) {
     if (!items.length) return;
     const q = offlineQueues.get(pubkey) || [];
@@ -821,6 +929,9 @@ function placeQueued(pubkey, items) {
  * Encola un mensaje para un destinatario desconectado. Con content, primero sube el
  * cuerpo y solo después lo anota: un mensaje anotado sin cuerpo no existe. Lanza con
  * `code` si no se pudo guardar, y quien llama se lo dice a quien lo mandó.
+ * @param {string} recipientPubkey
+ * @param {import('./types/index.js').QueuedItem} queued
+ * @returns {Promise<void>}
  */
 async function enqueueOffline(recipientPubkey, queued) {
     if (contentQueue) {
@@ -830,7 +941,7 @@ async function enqueueOffline(recipientPubkey, queued) {
         for (;;) {
             try { queued.cid = await contentQueue.put(recipientPubkey, queued.message, queued.expiresAt); break; }
             catch (e) {
-                const freed = e.code === 'queue-full' && dropOldestQueued('content node is out of space');
+                const freed = /** @type {NodeJS.ErrnoException} */ (e).code === 'queue-full' && dropOldestQueued('content node is out of space');
                 if (!freed) throw e;
                 await freed;
             }
@@ -853,13 +964,20 @@ async function enqueueOffline(recipientPubkey, queued) {
  * Lo que toca se RECLAMA antes del primer `await` (se saca de la cola): con el cuerpo en el
  * content, leerlo es asíncrono, y dos instancias de la misma app identificándose a la vez
  * se lo habrían entregado las dos. Lo que no se pudo entregar vuelve a la cola, en su orden.
+ * @param {string} pubkey
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {string | null} [app]
+ * @returns {Promise<number>} cuántos se entregaron
  */
 async function flushOfflineFor(pubkey, ws, app = null) {
     const q = offlineQueues.get(pubkey);
     if (!q || q.length === 0) return 0;
     const now = Date.now();
+    /** @type {import('./types/index.js').QueuedItem[]} */
     const mine = [];
+    /** @type {import('./types/index.js').QueuedItem[]} */
     const keep = [];
+    /** @type {import('./types/index.js').QueuedItem[]} */
     const expired = [];
     for (const item of q) {
         if (item.expiresAt < now) expired.push(item);
@@ -870,7 +988,9 @@ async function flushOfflineFor(pubkey, ws, app = null) {
     forgetQueued(expired);
 
     let delivered = 0;
+    /** @type {import('./types/index.js').QueuedItem[]} */
     const done = [];
+    /** @type {import('./types/index.js').QueuedItem[]} */
     let back = [];
     for (let i = 0; i < mine.length; i++) {
         const item = mine[i];
@@ -883,13 +1003,13 @@ async function flushOfflineFor(pubkey, ws, app = null) {
             }
             try { message = await contentQueue.get(item.cid, pubkey); }
             catch (e) {
-                if (e.code === 'queue-gone' || e.code === 'queue-corrupt') {
+                if (/** @type {NodeJS.ErrnoException} */ (e).code === 'queue-gone' || /** @type {NodeJS.ErrnoException} */ (e).code === 'queue-corrupt') {
                     // No hay nada que entregar: se dice, y la fila se quita.
-                    console.error(`[queue] a queued message was lost: ${e.message}`);
+                    console.error(`[queue] a queued message was lost: ${/** @type {Error} */ (e).message}`);
                     done.push(item);
                     continue;
                 }
-                console.error(`[queue] cannot read queued messages now, they stay queued: ${e.message}`);
+                console.error(`[queue] cannot read queued messages now, they stay queued: ${/** @type {Error} */ (e).message}`);
                 back = mine.slice(i);
                 break;
             }
@@ -912,6 +1032,7 @@ async function flushOfflineFor(pubkey, ws, app = null) {
     return delivered;
 }
 
+/** Quita de las colas lo que ya caducó. */
 function cleanupOfflineQueues() {
     const now = Date.now();
     for (const [pk, q] of Array.from(offlineQueues.entries())) {
@@ -923,12 +1044,14 @@ function cleanupOfflineQueues() {
     persist.deleteExpired(now);
 }
 
+/** @param {string} publickey @param {string} token */
 function bindPubkey(publickey, token) {
     if (!pubkeyToTokens.has(publickey)) pubkeyToTokens.set(publickey, new Set());
-    pubkeyToTokens.get(publickey).add(token);
+    /** @type {Set<string>} */ (pubkeyToTokens.get(publickey)).add(token);
     tokenToPubkey.set(token, publickey);
 }
 
+/** @param {string} token */
 function unbindPubkeyFromToken(token) {
     unbindExtraPubkeys(token);
     const pk = tokenToPubkey.get(token);
@@ -944,13 +1067,15 @@ function unbindPubkeyFromToken(token) {
 // "Una identidad": además de su pubkey D, una conexión puede quedar bound a la pubkey
 // MAESTRA M si presenta un cert válido (D delegado por M). Así los mensajes dirigidos a
 // M llegan a este dispositivo. La privada de M NUNCA interviene (el cert es offline-verificable).
+/** @param {string} publickey @param {string} token */
 function bindExtraPubkey(publickey, token) {
     if (!pubkeyToTokens.has(publickey)) pubkeyToTokens.set(publickey, new Set());
-    pubkeyToTokens.get(publickey).add(token);
+    /** @type {Set<string>} */ (pubkeyToTokens.get(publickey)).add(token);
     if (!tokenToExtraPubkeys.has(token)) tokenToExtraPubkeys.set(token, new Set());
-    tokenToExtraPubkeys.get(token).add(publickey);
+    /** @type {Set<string>} */ (tokenToExtraPubkeys.get(token)).add(publickey);
 }
 
+/** @param {string} token */
 function unbindExtraPubkeys(token) {
     const set = tokenToExtraPubkeys.get(token);
     if (!set) return;
@@ -965,6 +1090,11 @@ function unbindExtraPubkeys(token) {
 // delega EXACTAMENTE a `deviceJwkStr`, o null. Reusa la verificación de firma del proxy
 // (mismo canónico que @dotrino/identity). NO chequea revocación: esa lista vive en el vault
 // y el cert caduca solo (tope 30d) → un cert revocado-pero-vigente solo enrutaría a M hasta exp.
+/**
+ * @param {any} cert  el cert del cliente, sin validar
+ * @param {string} deviceJwkStr
+ * @returns {string | null} la llave que lo firmó (`iss`), o null si no vale
+ */
 function verifyDeviceCert(cert, deviceJwkStr) {
     if (!cert || typeof cert !== 'object') return null;
     const { v, iss, sub, scope, iat, exp, nonce, sig } = cert;
@@ -984,8 +1114,13 @@ function verifyDeviceCert(cert, deviceJwkStr) {
  * que `canSeal`/`sealersOf` de @dotrino/identity, escrita aquí porque el proxio no importa
  * el pilar — si alguna vez divergen, manda el pilar.
  */
+/**
+ * @param {import('./types/index.js').WireActa} acta
+ * @param {unknown} pub
+ * @returns {boolean}
+ */
 function canSeal(acta, pub) {
-    if (acta.v <= 2 && acta.sealer === pub) return true;
+    if (/** @type {number} */ (acta.v) <= 2 && acta.sealer === pub) return true; // `v` ya comprobada por quien llama
     const m = (acta.members || []).find(x => x && x.pub === pub);
     if (!m || !Array.isArray(m.caps) || !m.caps.includes('sealer')) return false;
     // Una renuncia QUITA permisos y es unilateral: viaja dentro del acta y hay que restarla,
@@ -1012,9 +1147,13 @@ function canSeal(acta, pub) {
 const ACTA_VERSIONS = [1, 2, 3, 4, 5];
 
 /** Quién puede sellar según el acta: la misma regla que `sealersOf` de @dotrino/identity. */
+/**
+ * @param {import('./types/index.js').WireActa} acta
+ * @returns {unknown[]}
+ */
 function sealersOf(acta) {
-    const byCap = (acta.members || []).filter(m => m && canSeal(acta, m.pub)).map(m => m.pub);
-    if (acta.v <= 2 && acta.sealer && !byCap.includes(acta.sealer)) return [acta.sealer, ...byCap];
+    const byCap = (acta.members || []).filter(m => m && canSeal(acta, m.pub)).map(m => /** @type {{ pub?: string }} */ (m).pub);
+    if (/** @type {number} */ (acta.v) <= 2 && acta.sealer && !byCap.includes(/** @type {string} */ (acta.sealer))) return [acta.sealer, ...byCap];
     return byCap;
 }
 
@@ -1037,13 +1176,17 @@ function sealersOf(acta) {
  * selladora retirada; quien tenga esa llave puede atarse este perfil hasta que el dueño la
  * quite y el eslabón nuevo circule. Lo peor que consigue es enrutarse mensajes a sí mismo.
  */
+/**
+ * @param {import('./types/index.js').WireActa} acta
+ * @returns {boolean}
+ */
 function profileVouchesFor(acta) {
     const l = acta.sealerLink;
     if (!l || typeof l !== 'object' || l.v !== 1) return false;
     if (l.profileId !== acta.profileId || l.by !== acta.profileId) return false;
     if (typeof l.sig !== 'string' || !Number.isInteger(l.seq) || l.seq < 1) return false;
     if (!Array.isArray(l.sealers) || !l.sealers.includes(acta.sealedBy)) return false;
-    if (acta.sealerChanged ? l.seq !== acta.seq : !(l.seq < acta.seq)) return false;
+    if (acta.sealerChanged ? l.seq !== acta.seq : !(l.seq < /** @type {number} */ (acta.seq))) return false;
     const says = [...l.sealers].sort().join('|');
     if (says !== sealersOf(acta).sort().join('|')) return false;
     let byJwk; try { byJwk = JSON.parse(l.by); } catch { return false; }
@@ -1051,10 +1194,16 @@ function profileVouchesFor(acta) {
     return verifySignatureWithJWK(body, l.sig, byJwk);
 }
 
+/**
+ * @param {import('./types/index.js').WireActa} acta
+ * @param {string} deviceJwkStr
+ * @returns {string | null} el profileId
+ */
 function verifyActaMembership(acta, deviceJwkStr) {
     const profileId = verifyActaSeal(acta);
     if (!profileId) return null;
-    if (!acta.members.some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
+    // `verifyActaSeal` ya comprobó que `members` es un array.
+    if (!/** @type {NonNullable<import('./types/index.js').WireActa['members']>} */ (acta.members).some(m => m && m.pub === deviceJwkStr)) return null;   // quien habla es miembro
     return profileId;
 }
 
@@ -1062,9 +1211,11 @@ function verifyActaMembership(acta, deviceJwkStr) {
  * ¿Es esta acta de la cuenta que dice ser? Lo mismo que `verifyActaMembership` sin mirar quién
  * la presenta: para la caché de actas (`actaCache.js`), que la guarda la traiga quien la traiga.
  * Devuelve el `profileId`, o `null`.
+ * @param {import('./types/index.js').WireActa | null | undefined} acta
+ * @returns {string | null}
  */
 function verifyActaSeal(acta) {
-    if (!acta || typeof acta !== 'object' || !ACTA_VERSIONS.includes(acta.v)) return null;
+    if (!acta || typeof acta !== 'object' || !ACTA_VERSIONS.includes(/** @type {number} */ (acta.v))) return null;
     const { profileId, sealer, sealedBy, members, sig } = acta;
     if (typeof profileId !== 'string' || typeof sealedBy !== 'string') return null;
     // `sealer` solo existe en las actas viejas (v1/v2). Si está, tiene que ser una string;
@@ -1125,6 +1276,7 @@ const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@dotrino.com';
 //   3. Autogenerar una vez y persistir. Así el proxy es zero-config y las
 //      claves se mantienen ESTABLES entre reinicios (regenerarlas invalidaría
 //      todas las subscriptions existentes).
+/** @returns {{ publicKey: string, privateKey: string, source: string }} */
 function resolveVapidKeys() {
     const envPub = process.env.VAPID_PUBLIC_KEY || '';
     const envPriv = process.env.VAPID_PRIVATE_KEY || '';
@@ -1171,8 +1323,10 @@ if (pushEnabled) {
  *     antes. No es un repliegue: es lo que significa no decir a quién va.
  */
 const APP_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/** @param {unknown} v @returns {string | null} */
 const appOf = (v) => (typeof v === 'string' && APP_RE.test(v) ? v : null);
 /** ¿Le toca a quien es `have` (app de la suscripción/conexión) lo que va para `want`? */
+/** @param {string | null | undefined} have @param {string | null | undefined} want */
 const appMatches = (have, want) => !have || !want || have === want;
 
 // publickey -> Map(app -> PushSubscription); app '' = no dijo cuál. En RAM, respaldado en
@@ -1183,11 +1337,17 @@ if (pushSubscriptions.size) {
 }
 
 /** Lo que identifica al receptor de un timbre: el token nativo o el endpoint del navegador. */
+/** @param {any} sub  la suscripción guardada (Web Push, FCM, APNs o vault) @returns {string | null} */
 const subTarget = (sub) => (sub && (sub.token || sub.endpoint)) || null;
 
+/**
+ * @param {string} pubkey
+ * @param {string | null} app
+ * @param {import('./types/index.js').StoredSubscription} subscription
+ */
 function setPushSubscription(pubkey, app, subscription) {
     if (!pushSubscriptions.has(pubkey)) pushSubscriptions.set(pubkey, new Map());
-    const subs = pushSubscriptions.get(pubkey);
+    const subs = /** @type {Map<string, import('./types/index.js').StoredSubscription>} */ (pushSubscriptions.get(pubkey));
     // UN RECEPTOR, UNA SUSCRIPCIÓN. Si esta app se registró antes sin decir cuál era, esa fila
     // vieja («a todas») sigue con el mismo token y timbraría con lo de las demás apps: es
     // exactamente lo que se viene a quitar. La que dice su app la reemplaza.
@@ -1203,6 +1363,10 @@ function setPushSubscription(pubkey, app, subscription) {
 }
 
 // Sin `app` (undefined): todas las de esa llave. Con app: solo esa.
+/**
+ * @param {string} pubkey
+ * @param {string | null} [app]  sin app: todas las de la llave
+ */
 function removePushSubscription(pubkey, app) {
     const subs = pushSubscriptions.get(pubkey);
     if (!subs) return;
@@ -1215,6 +1379,12 @@ function removePushSubscription(pubkey, app) {
 // Con `app`, solo las de esa app: un mismo token puede estar suscrito por dos partes de la
 // misma app con nombres distintos, y cada una dice lo suyo.
 // @returns {number} cuántas se quitaron
+/**
+ * @param {string} target
+ * @param {string | null | undefined} app
+ * @param {Set<string>} keep
+ * @returns {number}
+ */
 function prunePushSubscriptions(target, app, keep) {
     let removed = 0;
     for (const [pubkey, subs] of [...pushSubscriptions]) {
@@ -1255,6 +1425,10 @@ function prunePushSubscriptions(target, app, keep) {
 // un sobre que no pueden abrir; el teléfono lo abre sin red y dice quién pide qué. Este
 // servidor no lo lee ni lo entiende: solo comprueba la forma y el tamaño (FCM admite 4 KB).
 const RING_SEALED_MAX = 2048;
+/**
+ * @param {any} m  el cuerpo del mensaje (JSON del emisor)
+ * @returns {string | null}
+ */
 function sealedRing(m) {
     const r = m && m.ring;
     if (!r || typeof r !== 'object' || !r.wrap || !r.envelope || typeof r.wrap !== 'object' || typeof r.envelope !== 'object') return null;
@@ -1262,12 +1436,17 @@ function sealedRing(m) {
     return s.length <= RING_SEALED_MAX ? s : null;
 }
 
+/**
+ * @param {unknown} msgBody
+ * @returns {import('./types/index.js').RingHint | null}
+ */
 function ringHint(msgBody) {
+    /** @type {any} JSON del emisor: se mira campo a campo */
     let m = msgBody;
     if (typeof m === 'string') { try { m = JSON.parse(m); } catch (_) { return null; } }
     const b = m && m.type === 'vault.admin.event' ? m.body : null;
     if (!b) return null;
-    const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
+    const str = (/** @type {unknown} */ v, /** @type {number} */ n) => (typeof v === 'string' ? v.slice(0, n) : null);
     const sealed = sealedRing(m);
     const plus = sealed ? { sealed } : {};
     if (b.ev === 'approval') {
@@ -1291,10 +1470,15 @@ function ringHint(msgBody) {
 const WAKE_APP = 'wake';
 /** Lo que tarda una bóveda en arrancar y conectarse: dentro de esta ventana no se repite. */
 const WAKE_DEDUP_MS = 90_000;
+/** @type {Map<string, number>} */
 const wakingUntil = new Map();   // profileId -> ms hasta el que no se vuelve a llamar
 
 const WAKE_CHANNEL_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 
+/**
+ * @param {any} sub  lo que mandó el cliente, sin validar
+ * @returns {import('./types/index.js').WakeSubscription | null}
+ */
 function parseWakeSubscription(sub) {
     if (!sub || sub.kind !== 'wake' || typeof sub.url !== 'string' || sub.url.length > 2048) return null;
     let u;
@@ -1321,15 +1505,24 @@ function parseWakeSubscription(sub) {
  * canal de otra cuenta solo hace que te despierten a ti cuando la buscan a ella; a ella la
  * siguen despertando igual.
  */
+/**
+ * @param {string} channel
+ * @returns {Array<[string, import('./types/index.js').WakeSubscription]>}
+ */
 function wakesForChannel(channel) {
+    /** @type {Array<[string, import('./types/index.js').WakeSubscription]>} */
     const out = [];
     for (const [pubkey, subs] of pushSubscriptions) {
         const w = subs.get(WAKE_APP);
-        if (w && w.channel === channel) out.push([pubkey, w]);
+        if (w && w.kind === 'wake' && w.channel === channel) out.push([pubkey, w]);
     }
     return out;
 }
 
+/**
+ * @param {string} pubkey
+ * @param {import('./types/index.js').WakeSubscription} sub
+ */
 function wakeVault(pubkey, sub) {
     // Conectada no se despierta: ya recibió el mensaje en vivo.
     if (pubkeyToTokens.get(pubkey)?.size) return;
@@ -1355,6 +1548,11 @@ function wakeVault(pubkey, sub) {
 
 // Dispara el "timbre". Best-effort: si la subscription está muerta (404/410) la
 // borramos; el mensaje ya quedó encolado de todos modos.
+/**
+ * @param {string} pubkey
+ * @param {string | null | undefined} app
+ * @param {import('./types/index.js').RingHint | null} [extra]
+ */
 function ringPush(pubkey, app, extra) {
     const subs = pushSubscriptions.get(pubkey);
     if (!subs) return;
@@ -1363,12 +1561,19 @@ function ringPush(pubkey, app, extra) {
     }
 }
 
+/**
+ * @param {string} pubkey
+ * @param {string} subApp
+ * @param {import('./types/index.js').StoredSubscription} sub
+ * @param {import('./types/index.js').RingHint | null} [extra]
+ */
 function ringOne(pubkey, subApp, sub, extra) {
     if (sub.kind === 'wake') return wakeVault(pubkey, sub);
     const ring = { type: 'ring', ts: Date.now(), ...(extra || {}) };
     // Lo que sabe del pedido (`why`) SOLO viaja por Web Push, que va cifrado hasta el
     // navegador. FCM y APNs lo leen Google y Apple: a ellos, el timbre vacío de siempre, más
     // el asunto SELLADO al teléfono (`sealed`), que no pueden abrir.
+    /** @type {Record<string, unknown>} */
     const bare = { ...ring }; delete bare.why;
     // App nativa (FCM): la suscripción es `{ kind:'fcm', token }`, no una PushSubscription.
     if (sub.kind === 'fcm') {
@@ -1411,12 +1616,18 @@ const { CronExpressionParser } = require('cron-parser');
 const SCHED_TICK_MS = Number(process.env.SCHED_TICK_MS) || 30 * 1000;
 
 // Próximo disparo futuro (> from) de una expresión cron en una tz. null si inválida.
+/**
+ * @param {string} cron
+ * @param {string | null | undefined} tz
+ * @param {number} from
+ * @returns {number | null}
+ */
 function cronNextFire(cron, tz, from) {
     try {
         const it = CronExpressionParser.parse(cron, { currentDate: new Date(from), tz: tz || 'UTC' });
         return it.next().toDate().getTime();
     } catch (e) {
-        console.error('[sched] invalid cron:', cron, e.message);
+        console.error('[sched] invalid cron:', cron, /** @type {Error} */ (e).message);
         return null;
     }
 }
@@ -1441,7 +1652,7 @@ function reconcileScheduledPushes() {
 function runScheduledPushes() {
     const now = Date.now();
     let due;
-    try { due = persist.loadDueScheduledPushes(now); } catch (e) { console.error('[sched] load error:', e.message); return; }
+    try { due = persist.loadDueScheduledPushes(now); } catch (e) { console.error('[sched] load error:', /** @type {Error} */ (e).message); return; }
     for (const job of due) {
         let extra;
         try { extra = job.payload ? JSON.parse(job.payload) : undefined; } catch (_) { extra = undefined; }
@@ -1458,17 +1669,19 @@ function runScheduledPushes() {
 }
 
 // Función para ordenar tokens y crear clave de par
+/** @param {string} token1 @param {string} token2 @returns {string} */
 function createPairKey(token1, token2) {
     return token1 < token2 ? `${token1}:${token2}` : `${token2}:${token1}`;
 }
 
 // Agregar entrada a un canal público
+/** @param {string} channel @param {string} token */
 function addToPublicChannel(channel, token) {
     if (!publicChannels.has(channel)) {
         publicChannels.set(channel, []);
     }
     
-    const entries = publicChannels.get(channel);
+    const entries = /** @type {import('./types/index.js').ChannelEntry[]} */ (publicChannels.get(channel)); // el `has` de arriba lo garantiza
     const now = Date.now();
     
     // Remover si ya existe para evitar duplicados
@@ -1487,9 +1700,10 @@ function addToPublicChannel(channel, token) {
 }
 
 // Remover entrada de un canal público
+/** @param {string} channel @param {string} token */
 function removeFromPublicChannel(channel, token) {
     if (!publicChannels.has(channel)) return;
-    const entries = publicChannels.get(channel);
+    const entries = /** @type {import('./types/index.js').ChannelEntry[]} */ (publicChannels.get(channel)); // el `has` de arriba lo garantiza
     const validEntries = entries.filter(entry => entry.token !== token);
     
     if (validEntries.length === 0) {
@@ -1500,6 +1714,7 @@ function removeFromPublicChannel(channel, token) {
 }
 
 // Remover entrada de todos los canales públicos
+/** @param {string} token */
 function removeFromAllPublicChannels(token) {
     for (const [channel, entries] of publicChannels) {
         const validEntries = entries.filter(entry => entry.token !== token);
@@ -1512,6 +1727,7 @@ function removeFromAllPublicChannels(token) {
 }
 
 // Quitar un token de todos los canales que observaba (al desconectar).
+/** @param {string} token */
 function removeFromAllWatchers(token) {
     for (const [channel, set] of channelWatchers) {
         if (set.delete(token) && set.size === 0) channelWatchers.delete(channel);
@@ -1519,12 +1735,16 @@ function removeFromAllWatchers(token) {
 }
 
 // Obtener tokens no expirados de un canal
+/**
+ * @param {string} channel
+ * @returns {string[]} los tokens vigentes
+ */
 function getChannelTokens(channel) {
     if (!publicChannels.has(channel)) {
         return [];
     }
     
-    const entries = publicChannels.get(channel);
+    const entries = /** @type {import('./types/index.js').ChannelEntry[]} */ (publicChannels.get(channel)); // el `has` de arriba lo garantiza
     const now = Date.now();
     
     // Filtrar entradas expiradas
@@ -1567,8 +1787,15 @@ function cleanupExpiredChannelEntries() {
 
 // Notificar a clientes pareados sobre desconexión
 // skipTokens: Set de tokens a excluir (ya notificados por broadcast de canal)
+/**
+ * @param {string} disconnectedToken
+ * @param {Set<string>} [skipTokens]
+ * @returns {number}
+ */
 function notifyPairedClients(disconnectedToken, skipTokens = new Set()) {
+    /** @type {Set<string>} */
     const tokensToNotify = new Set();
+    /** @type {string[]} */
     const pairsToRemove = [];
 
     // Buscar todos los pares que incluyen el token desconectado
@@ -1607,6 +1834,12 @@ function notifyPairedClients(disconnectedToken, skipTokens = new Set()) {
 // Notificar a los observadores read-only de un canal (channelWatchers). Reciben
 // el mismo frame que los miembros (joined/left/disconnected) pero no figuran en
 // la lista. `excludeToken` evita avisarle al propio sujeto del evento.
+/**
+ * @param {string} channelName
+ * @param {Record<string, unknown>} frame
+ * @param {string} excludeToken
+ * @returns {number}
+ */
 function notifyWatchers(channelName, frame, excludeToken) {
     const set = channelWatchers.get(channelName);
     if (!set || set.size === 0) return 0;
@@ -1618,6 +1851,7 @@ function notifyWatchers(channelName, frame, excludeToken) {
     return notified;
 }
 
+/** @param {string} joiningToken @param {string} channelName @returns {number} */
 function notifyChannelMembersOfJoin(joiningToken, channelName) {
     notifyWatchers(channelName, { type: 'joined', token: joiningToken, channel: channelName, timestamp: new Date().toISOString() }, joiningToken);
     const entries = publicChannels.get(channelName);
@@ -1638,6 +1872,7 @@ function notifyChannelMembersOfJoin(joiningToken, channelName) {
 }
 
 // Notificar a los miembros restantes del canal que un token se despublicó
+/** @param {string} leavingToken @param {string} channelName @returns {number} */
 function notifyChannelMembersOfLeave(leavingToken, channelName) {
     notifyWatchers(channelName, { type: 'left', token: leavingToken, channel: channelName, timestamp: new Date().toISOString() }, leavingToken);
     const entries = publicChannels.get(channelName);
@@ -1658,7 +1893,9 @@ function notifyChannelMembersOfLeave(leavingToken, channelName) {
 
 // Notificar a los miembros de cada canal donde el token estaba publicado
 // Devuelve el Set de tokens receptores notificados (para deduplicación con notifyPairedClients)
+/** @param {string} disconnectedToken @returns {Set<string>} a quién se avisó */
 function notifyChannelMembersOfDisconnect(disconnectedToken) {
+    /** @type {Set<string>} */
     const notified = new Set();
     const timestamp = new Date().toISOString();
 
@@ -1689,6 +1926,10 @@ function notifyChannelMembersOfDisconnect(disconnectedToken) {
 }
 
 // Remover par de conexión manualmente y notificar a ambas partes
+/**
+ * @param {string} token1
+ * @param {string} token2
+ */
 function removeConnectionPair(token1, token2) {
     const pairKey = createPairKey(token1, token2);
     
@@ -1725,8 +1966,8 @@ function removeConnectionPair(token1, token2) {
 // Helper functions para manejar IDs de mensajes
 /**
  * Extraer valores de ID de un objeto de mensaje
- * @param {Object} message - El mensaje entrante
- * @returns {Object} Objeto con propiedades id y messageId (undefined si no están presentes)
+ * @param {import('./types/index.js').ClientMessage} message - El mensaje entrante
+ * @returns {{ id: unknown, messageId: unknown }} Objeto con propiedades id y messageId (undefined si no están presentes)
  */
 function extractMessageIds(message) {
     return {
@@ -1737,16 +1978,19 @@ function extractMessageIds(message) {
 
 /**
  * Aplicar campos ID de un mensaje a un objeto de respuesta
- * @param {Object} response - El objeto de respuesta a modificar
- * @param {Object} message - El mensaje original
- * @returns {Object} El objeto de respuesta modificado
+ * @template {Record<string, unknown>} R
+ * @param {R} response - El objeto de respuesta a modificar
+ * @param {import('./types/index.js').ClientMessage} message - El mensaje original
+ * @returns {R} El objeto de respuesta modificado
  */
 function applyMessageIds(response, message) {
+    /** @type {Record<string, unknown>} */
+    const r = response;
     if (message.id !== undefined) {
-        response.id = message.id;
+        r.id = message.id;
     }
     if (message.messageId !== undefined) {
-        response.messageId = message.messageId;
+        r.messageId = message.messageId;
     }
     return response;
 }
@@ -1758,6 +2002,11 @@ function applyMessageIds(response, message) {
  *   `originalMessage.to`, así el receptor puede penalizar localmente al emisor.
  * Para tipos especiales (publish/list/etc.): el "afectado" es el proxy, así
  *   que la notificación vuelve al propio emisor como aviso informativo.
+ */
+/**
+ * @param {string} senderToken
+ * @param {string} operation
+ * @param {import('./types/index.js').ClientMessage | null | undefined} originalMessage
  */
 function emitAbuseNotice(senderToken, operation, originalMessage) {
     const notice = {
@@ -1790,8 +2039,8 @@ function emitAbuseNotice(senderToken, operation, originalMessage) {
 /**
  * Validar formato de canal según nueva especificación
  * Formato esperado: {data: {name: "channelName", publickey: "pubkey", ...}, signature: "datasignature"}
- * @param {Object} channelData - Objeto de canal a validar
- * @returns {Object} Resultado de validación {valid: boolean, error: string, channelName: string}
+ * @param {any} channelData - Objeto de canal a validar (JSON del cliente)
+ * @returns {{ valid: true, channelName: string, code?: undefined, error?: undefined } | { valid: false, code: string, error: string, channelName?: undefined }} Resultado de validación
  */
 function validateChannelFormat(channelData) {
     // Validar que el objeto no sea nulo
@@ -1836,7 +2085,7 @@ function validateChannelFormat(channelData) {
 
 /**
  * Validar firma del canal
- * @param {Object} channelData - Datos del canal
+ * @param {any} channelData - Datos del canal (JSON del cliente)
  * @returns {boolean} true si la firma es válida
  */
 function validateSignature(channelData) {
@@ -1858,9 +2107,9 @@ function validateSignature(channelData) {
 
 /**
  * Verificar firma usando clave pública JWK
- * @param {Object} data - Datos a verificar
- * @param {string} signatureBase64 - Firma en base64
- * @param {Object} publicKeyJwk - Clave pública en formato JWK
+ * @param {unknown} data - Datos a verificar
+ * @param {unknown} signatureBase64 - Firma en base64
+ * @param {any} publicKeyJwk - Clave pública en formato JWK (sin validar)
  * @returns {boolean} true si la firma es válida
  */
 function verifySignatureWithJWK(data, signatureBase64, publicKeyJwk) {
@@ -1888,7 +2137,7 @@ function verifySignatureWithJWK(data, signatureBase64, publicKeyJwk) {
 
 /**
  * Stringify object with sorted keys for canonical representation
- * @param {Object} obj Object to stringify
+ * @param {unknown} obj Object to stringify
  * @returns {string} Canonical JSON string
  */
 function canonicalStringify(obj) {
@@ -1903,7 +2152,7 @@ function canonicalStringify(obj) {
     // Object: sort keys
     const sortedKeys = Object.keys(obj).sort();
     const keyValuePairs = sortedKeys.map(key => {
-        return JSON.stringify(key) + ':' + canonicalStringify(obj[key]);
+        return JSON.stringify(key) + ':' + canonicalStringify(/** @type {Record<string, unknown>} */ (obj)[key]);
     });
     
     return '{' + keyValuePairs.join(',') + '}';
@@ -1911,7 +2160,7 @@ function canonicalStringify(obj) {
 
 /**
  * Validación básica de firma (para desarrollo/fallback)
- * @param {Object} channelData - Datos del canal
+ * @param {any} channelData - Datos del canal (JSON del cliente)
  * @returns {boolean} true si pasa validación básica
  */
 function validateSignatureBasic(channelData) {
@@ -1952,6 +2201,7 @@ function validateSignatureBasic(channelData) {
 /**
  * Verifica un sobre s2s: firmado por un peer PINEADO, fresco y no repetido.
  * Devuelve {ok:true, body, peer} o {ok:false, reason}.
+ * @param {any} envelope  JSON de otro nodo, sin validar
  */
 function verifyPeerEnvelope(envelope) {
     const body = envelope && envelope.body;
@@ -2027,7 +2277,9 @@ const server = http.createServer((req, res) => {
     // Federación: un peer nos reenvía un mensaje por pubkey. Lo entregamos a
     // instancias locales o lo encolamos si somos el home. NO re-reenviamos.
     if (req.url === '/federate' && req.method === 'POST') {
-        let size = 0; const chunks = [];
+        /** @type {Buffer[]} */
+        const chunks = [];
+        let size = 0;
         req.on('data', c => { size += c.length; if (size > 2 * 1024 * 1024) { req.destroy(); } else chunks.push(c); });
         req.on('end', async () => {
             try {
@@ -2074,7 +2326,12 @@ let rateLimiter = createRateLimiter();
 // (TURN_KEY_ID/TURN_KEY_API_TOKEN) queda como fallback para self-hosters.
 // Sin llaves: enabled:false (los clientes quedan STUN-only).
 // El tope diario del TURN avisa por correo: un tope que corta callado se descubre tarde.
+/** @param {import('./types/index.js').TurnUsageEvent} ev */
 const onTurnAlert = (ev) => { sendAlert(turnAlertText(ev)).catch(() => {}); };
+/**
+ * @param {ReturnType<typeof createTurnIssuer>} issuer
+ * @param {(msg: string) => void} [log]
+ */
 function logTurnCap(issuer, log = console.log) {
     if (!issuer.enabled) return;
     if (issuer.usage.enabled) log(`[turn] daily traffic cap: ${(issuer.usage.capBytes / 1e9).toFixed(2)} GB`);
@@ -2082,10 +2339,12 @@ function logTurnCap(issuer, log = console.log) {
 }
 let turnIssuer = createTurnIssuer({ onAlert: onTurnAlert });
 logTurnCap(turnIssuer);
+/** @type {ReturnType<typeof import('./vaultSecrets.js').startVaultSecrets> | null} */
 let vaultSecretsHandle = null;
 // Lo último que dijo la bóveda y que este proceso NO tiene aplicado. Se expone en
 // `GET /peers` para que se vea sin leer logs. Con `changed` dura lo que tarda el
 // reinicio; con `revoked` se queda, que es el caso en el que hay que hacer algo.
+/** @type {{ reason?: string, since: string } | null} */
 let vaultPending = null;
 
 // El proxy es transporte puro (sin secretos en su core): arranca SIEMPRE con lo
@@ -2116,7 +2375,7 @@ function startVaultSecretsLoop(log = console.log) {
             logTurnCap(turnIssuer, log);
             // La federación también sale de la bóveda: si los peers vinieron ahí
             // (y no en el `.env`), esta llamada es la que la levanta.
-            try { applyFederationConfig(log); } catch (e) { log('[fed] could not apply the vault config: ' + e.message); }
+            try { applyFederationConfig(log); } catch (e) { log('[fed] could not apply the vault config: ' + /** @type {Error} */ (e).message); }
             vaultPending = null;   // lo que acaba de llegar YA está aplicado
         },
         onPending: ({ reason, ts }) => {
@@ -2128,7 +2387,7 @@ function startVaultSecretsLoop(log = console.log) {
     }
 }
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', (/** @type {import('./types/index.js').ClientSocket} */ ws, req) => {
     // Conexión ENTRANTE de otro nodo (malla s2s): no es un cliente, no lleva
     // token ni cuenta para el rate limiter de usuarios. Se atiende aparte.
     if (Mesh.isMeshPath(req.url)) {
@@ -2226,7 +2485,7 @@ wss.on('connection', (ws, req) => {
                 let frame;
                 try { frame = wireBody.decodeFrame(data); }
                 catch (e) {
-                    ws.send(JSON.stringify({ type: 'error', code: e.code || 'bad-frame', error: `could not process the message: ${e.message}` }));
+                    ws.send(JSON.stringify({ type: 'error', code: /** @type {NodeJS.ErrnoException} */ (e).code || 'bad-frame', error: `could not process the message: ${/** @type {Error} */ (e).message}` }));
                     return;
                 }
                 message = { ...frame.header, message: Buffer.from(frame.body) };
@@ -2551,6 +2810,10 @@ wss.on('connection', (ws, req) => {
 // bóveda conectada; medido el 2026-10-25), aunque son siempre las mismas. Reciben el
 // `ws` de la conexión y leen de ahí su token: `ws.token` se asigna una vez al conectar
 // y no cambia.
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handlePublishMessage(ws, message) {
     const token = ws.token;
     const channelData = message.channel;
@@ -2615,6 +2878,10 @@ function handlePublishMessage(ws, message) {
     if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} published in ${channelName} · notified ${notifiedJoin} member(s)`);
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleUnpublishMessage(ws, message) {
     const token = ws.token;
     const channelData = message.channel;
@@ -2659,6 +2926,10 @@ function handleUnpublishMessage(ws, message) {
     if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} unpublished from ${channelName} · notified ${notifiedLeave} member(s)`);
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleListMessage(ws, message) {
     const token = ws.token;
     const channelData = message.channel;
@@ -2721,6 +2992,10 @@ function handleListMessage(ws, message) {
 // Observar un canal (read-only): registra interés en sus eventos joined/left/
 // disconnected SIN publicarse como miembro. Devuelve la lista actual de tokens
 // para que el cliente tenga el estado inicial + luego los eventos en vivo.
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleWatchMessage(ws, message) {
     const token = ws.token;
     const validation = validateChannelFormat(message.channel);
@@ -2750,6 +3025,10 @@ function handleWatchMessage(ws, message) {
     if (process.env.NODE_ENV !== 'test') console.log(`[channels] ${token} watches ${channelName} (${tokens.length} token(s))`);
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleUnwatchMessage(ws, message) {
     const token = ws.token;
     const validation = validateChannelFormat(message.channel);
@@ -2765,6 +3044,10 @@ function handleUnwatchMessage(ws, message) {
     ws.send(JSON.stringify(response));
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleListChannelsMessage(ws, message) {
     const prefix = (typeof message.prefix === 'string') ? message.prefix : null;
     const now = Date.now();
@@ -2778,6 +3061,7 @@ function handleListChannelsMessage(ws, message) {
         }
     }
 
+    /** @type {Record<string, unknown>} */
     const response = {
         type: 'channels_list',
         channels,
@@ -2789,6 +3073,10 @@ function handleListChannelsMessage(ws, message) {
     ws.send(JSON.stringify(response));
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleChannelCountMessage(ws, message) {
     const channelName = message.channel;
 
@@ -2826,6 +3114,10 @@ function handleChannelCountMessage(ws, message) {
     ws.send(JSON.stringify(response));
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleDisconnectMessage(ws, message) {
     const token = ws.token;
     const targetToken = message.target;
@@ -2916,6 +3208,8 @@ function handleDisconnectMessage(ws, message) {
  * La segunda no añade seguridad criptográfica —la firma ya lo dice todo— pero sí
  * impide que un desconocido llene el directorio de anuncios de terceros que capturó
  * por ahí. Anunciar es para uno mismo.
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
  */
 function handleEncPubMessage(ws, message) {
     try {
@@ -2945,7 +3239,7 @@ function handleEncPubMessage(ws, message) {
         // devolvieran el mismo anuncio para siempre.
         if (stored) {
             try { mesh.broadcastEncPub({ data, signature: sig }); }
-            catch (e) { console.warn('[encpub] mesh broadcast failed:', e.message); }
+            catch (e) { console.warn('[encpub] mesh broadcast failed:', /** @type {Error} */ (e).message); }
         }
         const response = { type: 'encpub-announced', publickey: data.publickey, stored: stored };
         applyMessageIds(response, message);
@@ -2971,9 +3265,11 @@ function handleEncPubMessage(ws, message) {
  * (la bóveda al cambiarla, un agente que se acaba de enterar): lo que decide es el sello, igual
  * que al identificarse. Contesta `acta-put {stored}`; `stored:false` es que ya la tenía o que
  * hay más nuevas, no un error.
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
  */
 function handleActaPutMessage(ws, message) {
-    const reply = (r) => { applyMessageIds(r, message); ws.send(JSON.stringify(r)); };
+    const reply = (/** @type {Record<string, unknown>} */ r) => { applyMessageIds(r, message); ws.send(JSON.stringify(r)); };
     const profileId = verifyActaSeal(message.acta);
     if (!profileId) return reply({ type: 'error', code: 'bad-acta', error: 'acta-put: the record is not sealed by its account' });
     reply({ type: 'acta-put', profileId, seq: message.acta.seq, stored: actaCache.put(profileId, message.acta) });
@@ -2983,14 +3279,20 @@ function handleActaPutMessage(ws, message) {
  * `acta-get {profileId, sinceSeq?}`: las actas guardadas de esa cuenta más nuevas que
  * `sinceSeq`, de la más nueva a la más vieja. Lista vacía = no hay ninguna más nueva AQUÍ, no
  * que no exista: quien pregunta sigue con la bóveda.
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
  */
 function handleActaGetMessage(ws, message) {
-    const reply = (r) => { applyMessageIds(r, message); ws.send(JSON.stringify(r)); };
+    const reply = (/** @type {Record<string, unknown>} */ r) => { applyMessageIds(r, message); ws.send(JSON.stringify(r)); };
     if (typeof message.profileId !== 'string' || !message.profileId) return reply({ type: 'error', code: 'bad-input', error: 'acta-get: missing profileId' });
     const since = Number.isInteger(message.sinceSeq) ? message.sinceSeq : -1;
     reply({ type: 'acta-get', profileId: message.profileId, actas: actaCache.get(message.profileId, since) });
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleEncLookupMessage(ws, message) {
     try {
         const requested = Array.isArray(message.publickeys)
@@ -3028,6 +3330,10 @@ function handleEncLookupMessage(ws, message) {
     }
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 async function handleIdentifyMessage(ws, message) {
     const token = ws.token;
     try {
@@ -3103,7 +3409,7 @@ async function handleIdentifyMessage(ws, message) {
         // offline; las siguientes instancias no reciben nada antiguo.
         const wasFirstInstance =
             !pubkeyToTokens.has(data.publickey) ||
-            pubkeyToTokens.get(data.publickey).size === 0;
+            /** @type {Set<string>} */ (pubkeyToTokens.get(data.publickey)).size === 0;
         bindPubkey(data.publickey, ws.token);
         // QUÉ APP ES (fuera de lo firmado: es ruteo, y quien tiene la llave ya puede leerlo
         // todo). Con app, baja SU parte de la cola aunque la llave ya estuviera conectada en
@@ -3123,7 +3429,7 @@ async function handleIdentifyMessage(ws, message) {
         let masterBound = null;
         const master = verifyDeviceCert(message.cert, data.publickey);
         if (master && master !== data.publickey) {
-            const masterWasFirst = !pubkeyToTokens.has(master) || pubkeyToTokens.get(master).size === 0;
+            const masterWasFirst = !pubkeyToTokens.has(master) || /** @type {Set<string>} */ (pubkeyToTokens.get(master)).size === 0;
             bindExtraPubkey(master, ws.token);
             registerHome(master);
             masterBound = master;
@@ -3137,7 +3443,7 @@ async function handleIdentifyMessage(ws, message) {
         const profileId = verifyActaMembership(message.acta, data.publickey);
         if (profileId) actaCache.put(profileId, message.acta);
         if (profileId && profileId !== data.publickey && profileId !== masterBound) {
-            const profileWasFirst = !pubkeyToTokens.has(profileId) || pubkeyToTokens.get(profileId).size === 0;
+            const profileWasFirst = !pubkeyToTokens.has(profileId) || /** @type {Set<string>} */ (pubkeyToTokens.get(profileId)).size === 0;
             bindExtraPubkey(profileId, ws.token);
             registerHome(profileId);
             profileBound = profileId;
@@ -3164,6 +3470,10 @@ async function handleIdentifyMessage(ws, message) {
 // firmado por el vault (misma verificación que identify): la firma prueba
 // que quien envía la subscription es dueño de esa pubkey.
 //   data: { op:'push-subscribe', publickey, subscription, ts }
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handlePushSubscribeMessage(ws, message) {
     const token = ws.token;
     try {
@@ -3252,6 +3562,10 @@ function handlePushSubscribeMessage(ws, message) {
 // No va firmado, y no puede: no queda llave. Lo que autoriza es conocer el `target` (el
 // token de APNs/FCM o el endpoint de Web Push), que solo tienen ese aparato y este proxio.
 // Y lo único que se consigue con él es dejar de timbrar a ESE receptor.
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handlePushPruneMessage(ws, message) {
     try {
         const { target, keep } = message;
@@ -3273,6 +3587,10 @@ function handlePushPruneMessage(ws, message) {
 
 // Borrar la push subscription de una pubkey (la PWA desactiva notifs).
 //   data: { op:'push-unsubscribe', publickey, ts }
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handlePushUnsubscribeMessage(ws, message) {
     try {
         const data = message.data;
@@ -3308,6 +3626,11 @@ function handlePushUnsubscribeMessage(ws, message) {
 
 // Helper: valida sobre firmado por el vault y devuelve la pubkey (o null).
 // Self-only: el target SIEMPRE es data.publickey (quien firma).
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ * @param {string} op
+ */
 function verifySignedOp(ws, message, op) {
     const data = message.data;
     const sig  = message.signature;
@@ -3339,6 +3662,10 @@ function verifySignedOp(ws, message, op) {
 // ajeno desde otro socket. El TTL corto + cuota por pubkey/hora evitan
 // que las credenciales se farmeen para tráfico ajeno al ecosistema.
 //   data: { op:'turn-credentials', publickey, ts }
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 async function handleTurnCredentialsMessage(ws, message) {
     try {
         const data = verifySignedOp(ws, message, 'turn-credentials');
@@ -3382,7 +3709,7 @@ async function handleTurnCredentialsMessage(ws, message) {
         applyMessageIds(response, message);
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
     } catch (e) {
-        console.error('handleTurnCredentialsMessage error:', e.message);
+        console.error('handleTurnCredentialsMessage error:', /** @type {Error} */ (e).message);
         try {
             const errorResponse = { type: 'error', error: 'turn-credentials: error emitiendo credenciales' };
             applyMessageIds(errorResponse, message);
@@ -3393,6 +3720,10 @@ async function handleTurnCredentialsMessage(ws, message) {
 
 // Programar un push a la PROPIA pubkey. data.spec = JSON string con
 // { fireAt?:ms (one-shot) | cron?:string + tz?:string, payload?:object }.
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleSchedulePushMessage(ws, message) {
     try {
         const data = verifySignedOp(ws, message, 'schedule-push');
@@ -3431,6 +3762,10 @@ function handleSchedulePushMessage(ws, message) {
 }
 
 // Cancelar un job propio. data.jobId.
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleCancelPushMessage(ws, message) {
     try {
         const data = verifySignedOp(ws, message, 'cancel-push');
@@ -3448,6 +3783,10 @@ function handleCancelPushMessage(ws, message) {
 }
 
 // Listar los jobs propios.
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handleListPushesMessage(ws, message) {
     try {
         const data = verifySignedOp(ws, message, 'list-pushes');
@@ -3471,7 +3810,11 @@ function handleListPushesMessage(ws, message) {
 
 // ----- citas de emparejamiento (el código corto que ve un humano) -----
 
-/** Emite (o renueva) la cita de ESTA conexión. */
+/**
+ * Emite (o renueva) la cita de ESTA conexión.
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ */
 function handlePairCodeMessage(ws, message) {
     if (!nodeIdentity) {
         const e = { type: 'error', code: 'no-node-identity', error: 'this node cannot issue codes (it has no node identity)' };
@@ -3505,6 +3848,8 @@ function handlePairCodeMessage(ws, message) {
  * se pide otro código — molesta, pero no entrega a nadie con quien no era.
  * Y como el filtro sale del id DERIVADO de la llave, un nodo no puede siquiera
  * figurar como candidato de un código que no le corresponde.
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
  */
 function handlePairRedeemMessage(ws, message) {
     const raw = message.code;
@@ -3539,17 +3884,19 @@ function handlePairRedeemMessage(ws, message) {
     // Hay varios candidatos (o uno remoto): se pregunta a todos y se espera.
     const rid = `r${++redeemSeq}`;
     const local = isCandidate ? pairingCodes.redeem(code) : null;
+    /** @type {import('./types/index.js').PendingRedeem} */
     const pending = {
         ws, message,
         expected: remotes.length,
-        replies: local && !local.error ? [{ instance: local.instance, pubkey: local.pubkey }] : [],
+        replies: local && !local.error ? [{ instance: /** @type {string} */ (local.instance), pubkey: /** @type {string | null} */ (local.pubkey) }] : [],
         received: 0,
         timer: null
     };
     const resolve = () => {
         if (!pendingRedeems.has(rid)) return;
         pendingRedeems.delete(rid);
-        clearTimeout(pending.timer);
+        // El temporizador se arma justo después de crear `resolve`, antes de que nada pueda llamarla.
+        clearTimeout(/** @type {NodeJS.Timeout} */ (pending.timer));
         let response;
         if (pending.replies.length === 1) {
             const r = pending.replies[0];
@@ -3566,8 +3913,9 @@ function handlePairRedeemMessage(ws, message) {
         try { pending.ws.send(JSON.stringify(response)); } catch (_) {}
     };
     pending.resolve = resolve;
-    pending.timer = setTimeout(resolve, 6000);
-    if (pending.timer.unref) pending.timer.unref();
+    const redeemTimer = setTimeout(resolve, 6000);
+    pending.timer = redeemTimer;
+    if (redeemTimer.unref) redeemTimer.unref();
     pendingRedeems.set(rid, pending);
 
     let sentCount = 0;
@@ -3579,6 +3927,11 @@ function handlePairRedeemMessage(ws, message) {
     if (sentCount === 0) resolve();
 }
 
+/**
+ * @param {import('./types/index.js').ClientSocket} ws
+ * @param {import('./types/index.js').ClientMessage} message
+ * @param {string[]} targetPubkeys
+ */
 async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
     const senderPubkey = tokenToPubkey.get(ws.token) || null;
     const now = Date.now();
@@ -3598,20 +3951,25 @@ async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
     // A QUÉ APP va (ruteo, ver `appOf`). Sin app: a todas las de esa llave.
     const app = appOf(message.app);
     const expiresAt = now + OFFLINE_TTL_MS;
+    /** @type {string[]} */
     const sentInline = [];
+    /** @type {string[]} */
     const queued = [];
+    /** @type {string[]} */
     const dropped = [];
+    /** @type {string[]} */
     const failed = [];
     // Por qué no se pudo encolar (p. ej. `queue-unavailable`): sin esto, «no está y no
     // se pudo guardar» se veía igual que un destinatario inválido.
+    /** @type {string | null} */
     let queueError = null;
     let totalDeliveries = 0;
-    const queueFor = async (pk) => {
+    const queueFor = async (/** @type {string} */ pk) => {
         try {
             await enqueueOffline(pk, { from: ws.token, fromPubkey: senderPubkey, message: message.message, queuedAt: now, expiresAt, bytes: bytesOfMessage(message.message), app });
         } catch (e) {
-            console.error(`[queue] message for an offline recipient could not be queued (${e.code || 'error'}): ${e.message}`);
-            queueError = e.code || 'queue-unavailable';
+            console.error(`[queue] message for an offline recipient could not be queued (${/** @type {NodeJS.ErrnoException} */ (e).code || 'error'}): ${/** @type {Error} */ (e).message}`);
+            queueError = /** @type {NodeJS.ErrnoException} */ (e).code || 'queue-unavailable';
             failed.push(pk);
             return;
         }
@@ -3683,6 +4041,7 @@ async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
         }
     }
     if (queued.length || failed.length || dropped.length) {
+        /** @type {Record<string, unknown>} */
         const response = {
             type: 'message_sent',
             sent: sentInline.length,
@@ -3699,7 +4058,9 @@ async function handlePubkeyAddressedMessage(ws, message, targetPubkeys) {
     }
 }
 // Handles de intervalos para poder limpiarlos en stop()
+/** @type {ReturnType<typeof setInterval> | null} */
 let channelCleanupInterval = null;
+/** @type {ReturnType<typeof setInterval> | null} */
 let livenessInterval = null;
 const WS_LIVENESS_MS = 30 * 1000;
 
@@ -3712,8 +4073,11 @@ function sweepDeadClients() {
         try { ws.ping(); } catch (_) {}
     }
 }
+/** @type {ReturnType<typeof setInterval> | null} */
 let tokenCleanupInterval = null;
+/** @type {ReturnType<typeof setInterval> | null} */
 let offlineQueueInterval = null;
+/** @type {ReturnType<typeof setInterval> | null} */
 let scheduledPushInterval = null;
 
 /**
@@ -3751,7 +4115,7 @@ async function start(port = Number(PORT)) {
                 persist.deleteExpiredHomes(cutoff);
                 homePubkeys.clear();
                 for (const pk of persist.loadHomes(cutoff)) homePubkeys.add(pk);
-            } catch (e) { console.warn('[fed] homes purge failed:', e.message); }
+            } catch (e) { console.warn('[fed] homes purge failed:', /** @type {Error} */ (e).message); }
             try {
                 const cutoffEnc = Date.now() - ENCPUB_TTL_MS;
                 persist.deleteExpiredEncPubs(cutoffEnc);
@@ -3760,11 +4124,11 @@ async function start(port = Number(PORT)) {
                     try { encPubs.set(row.pubkey, { data: JSON.parse(row.data), signature: row.signature, ts: row.ts }); }
                     catch (_) {}
                 }
-            } catch (e) { console.warn('[encpub] purge failed:', e.message); }
+            } catch (e) { console.warn('[encpub] purge failed:', /** @type {Error} */ (e).message); }
         }, 60 * 60 * 1000).unref();
         startFederation();
 
-        const onError = (err) => {
+        const onError = (/** @type {Error} */ err) => {
             server.removeListener('error', onError);
             reject(err);
         };
@@ -3775,7 +4139,8 @@ async function start(port = Number(PORT)) {
         const bindHost = process.env.HOST || undefined;
         server.listen(port, bindHost, () => {
             server.removeListener('error', onError);
-            const actualPort = server.address().port;
+            // Escuchando por TCP, `address()` es un AddressInfo.
+            const actualPort = /** @type {import('node:net').AddressInfo} */ (server.address()).port;
             if (process.env.NODE_ENV !== 'test') {
                 console.log(`=========================================`);
                 console.log(`🚀 WebSocket proxy started`);
@@ -3787,7 +4152,7 @@ async function start(port = Number(PORT)) {
                 console.log(`=========================================`);
                 // Secretos del vault (TURN): DESPUÉS de escuchar — el transporte
                 // nunca espera al vault; solo la feature. En tests no aplica.
-                try { startVaultSecretsLoop(); } catch (e) { console.error('[vault] could not start loading secrets:', e.message); }
+                try { startVaultSecretsLoop(); } catch (e) { console.error('[vault] could not start loading secrets:', /** @type {Error} */ (e).message); }
             }
             resolve(actualPort);
         });
@@ -3846,7 +4211,7 @@ function stop() {
     // Reset del emisor TURN (limpia cache/cuotas; releé el .env)
     if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
     turnIssuer = createTurnIssuer({ onAlert: onTurnAlert });
-    if (vaultSecretsHandle && typeof vaultSecretsHandle.stop === 'function') vaultSecretsHandle.stop();
+    if (vaultSecretsHandle && 'stop' in vaultSecretsHandle && typeof vaultSecretsHandle.stop === 'function') vaultSecretsHandle.stop();
     vaultSecretsHandle = null;
 
     return new Promise((resolve) => {
@@ -3874,6 +4239,7 @@ if (require.main === module) {
 /**
  * Reemplazar el rate limiter activo (utilidad para tests con configuración custom).
  */
+/** @param {import('./types/index.js').RateLimiter} newLimiter */
 function setRateLimiter(newLimiter) {
     if (rateLimiter && typeof rateLimiter.destroy === 'function') rateLimiter.destroy();
     rateLimiter = newLimiter;
@@ -3882,6 +4248,7 @@ function setRateLimiter(newLimiter) {
 function getRateLimiter() { return rateLimiter; }
 
 /** Reemplazar el emisor TURN activo (utilidad para tests con fetch mockeado). */
+/** @param {ReturnType<typeof createTurnIssuer>} newIssuer */
 function setTurnIssuer(newIssuer) {
     if (turnIssuer && typeof turnIssuer.destroy === 'function') turnIssuer.destroy();
     turnIssuer = newIssuer;
@@ -3897,6 +4264,7 @@ module.exports = { start, stop, server, wss, setRateLimiter, getRateLimiter, set
 // servicio quedaba a la espera del TimeoutStopSec (~30-90s) — los deploys del CD
 // (cc-deploy) reiniciaban lentísimo. Con SIGTERM atendido, el restart es inmediato.
 let shuttingDown = false;
+/** @param {string} signal */
 function gracefulShutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;

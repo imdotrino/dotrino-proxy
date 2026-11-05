@@ -12,10 +12,18 @@ const path = require('path');
 
 const WATCHED = ['@dotrino/identity', '@dotrino/proxy-client', '@dotrino/vault'];
 
+/**
+ * @param {string} pkg
+ * @returns {string}
+ */
 function installedVersion(pkg) {
     return require(path.join(__dirname, 'node_modules', pkg, 'package.json')).version;
 }
 
+/**
+ * @param {(msg: string) => void} [log]
+ * @returns {Promise<unknown[]>} los vigías de cada pilar
+ */
 async function startUpdateWatch(log = console.log) {
     const { watchForUpdate } = await import('@dotrino/update');
     const handles = [];

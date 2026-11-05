@@ -22,13 +22,20 @@ const MAX_ACTA_BYTES = 256 * 1024
 /** Cuántas cuentas como mucho; se va la que lleva más tiempo sin tocarse. */
 const MAX_PROFILES = 20000
 
+/**
+ * Un acta firmada, tal como llega (se guarda entera; solo se miran `seq` y `sig`).
+ * @typedef {{ seq: number, sig: string, [key: string]: unknown }} Acta
+ */
+
 class ActaCache {
+    /** @param {{ perProfile?: number, maxBytes?: number, maxProfiles?: number }} [opts] */
     constructor({ perProfile = PER_PROFILE, maxBytes = MAX_ACTA_BYTES, maxProfiles = MAX_PROFILES } = {}) {
         this.perProfile = perProfile
         this.maxBytes = maxBytes
         this.maxProfiles = maxProfiles
         /** profileId → [{ seq, sig, acta, bytes }] ordenadas de más nueva a más vieja. Un Map
          *  recuerda el orden de inserción: se reinserta al tocar, y la primera es la más vieja. */
+        /** @type {Map<string, Array<{ seq: number, sig: string, acta: Acta, bytes: number }>>} */
         this.byProfile = new Map()
     }
 
@@ -36,6 +43,9 @@ class ActaCache {
      * Guarda `acta` (ya comprobada por quien llama) para `profileId`. Devuelve `true` si entró:
      * no entra si es más vieja que todas las guardadas con la lista llena, si ya estaba, o si
      * pesa demasiado.
+     * @param {unknown} profileId
+     * @param {Acta | null | undefined} acta
+     * @returns {boolean}
      */
     put(profileId, acta) {
         if (typeof profileId !== 'string' || !acta || !Number.isInteger(acta.seq) || typeof acta.sig !== 'string') return false
@@ -51,11 +61,16 @@ class ActaCache {
         list.sort((a, b) => b.seq - a.seq)
         list.length = Math.min(list.length, this.perProfile)
         this._touch(profileId, list)
-        while (this.byProfile.size > this.maxProfiles) this.byProfile.delete(this.byProfile.keys().next().value)
+        while (this.byProfile.size > this.maxProfiles) this.byProfile.delete(/** @type {string} */ (this.byProfile.keys().next().value))
         return true
     }
 
-    /** Las guardadas de `profileId` con `seq` MAYOR que `sinceSeq`, de más nueva a más vieja. */
+    /**
+     * Las guardadas de `profileId` con `seq` MAYOR que `sinceSeq`, de más nueva a más vieja.
+     * @param {string} profileId
+     * @param {number} [sinceSeq]
+     * @returns {Acta[]}
+     */
     get(profileId, sinceSeq = -1) {
         const list = this.byProfile.get(profileId)
         if (!list) return []
@@ -63,6 +78,10 @@ class ActaCache {
         return list.filter((e) => e.seq > sinceSeq).map((e) => e.acta)
     }
 
+    /**
+     * @param {string} profileId
+     * @param {Array<{ seq: number, sig: string, acta: Acta, bytes: number }>} list
+     */
     _touch(profileId, list) {
         this.byProfile.delete(profileId)
         this.byProfile.set(profileId, list)

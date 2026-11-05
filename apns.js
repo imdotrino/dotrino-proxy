@@ -20,9 +20,12 @@
 const crypto = require('node:crypto');
 const http2 = require('node:http2');
 
+/** @type {Record<'production' | 'sandbox', string>} */
 const HOSTS = { production: 'https://api.push.apple.com', sandbox: 'https://api.sandbox.push.apple.com' };
+/** @param {string | Buffer} buf */
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
 
+/** @returns {{ key: import('node:crypto').KeyObject, keyId: string, teamId: string } | null} */
 function loadKey() {
     const raw = process.env.APNS_KEY_B64 || '';
     const keyId = process.env.APNS_KEY_ID || '';
@@ -36,18 +39,29 @@ function loadKey() {
 
 // Apple rechaza un JWT de más de una hora y también uno renovado más de una vez cada 20
 // minutos: se reusa 50 minutos.
+/** @type {{ jwt: string | null, at: number }} */
 let cached = { jwt: null, at: 0 };
+/**
+ * @param {NonNullable<ReturnType<typeof loadKey>>} k
+ * @returns {string}
+ */
 function providerToken(k) {
     if (cached.jwt && Date.now() - cached.at < 50 * 60 * 1000) return cached.jwt;
     const header = b64url(JSON.stringify({ alg: 'ES256', kid: k.keyId }));
     const claims = b64url(JSON.stringify({ iss: k.teamId, iat: Math.floor(Date.now() / 1000) }));
     const sig = crypto.sign('sha256', Buffer.from(header + '.' + claims), { key: k.key, dsaEncoding: 'ieee-p1363' });
-    cached = { jwt: header + '.' + claims + '.' + b64url(sig), at: Date.now() };
-    return cached.jwt;
+    const jwt = header + '.' + claims + '.' + b64url(sig);
+    cached = { jwt, at: Date.now() };
+    return jwt;
 }
 
 // Una conexión HTTP/2 por entorno, reusada (Apple pide no abrir una por timbre).
+/** @type {Partial<Record<'production' | 'sandbox', import('node:http2').ClientHttp2Session>>} */
 const sessions = {};
+/**
+ * @param {'production' | 'sandbox'} env
+ * @returns {import('node:http2').ClientHttp2Session}
+ */
 function session(env) {
     const s = sessions[env];
     if (s && !s.closed && !s.destroyed) return s;
@@ -72,6 +86,10 @@ const RING = 'dotrino-ring.caf';
  * sin ver nada: el motivo se busca en el teléfono, sellado, y aquí no viaja. Sin extensión, iOS
  * enseña la alerta de siempre.
  */
+/**
+ * @param {Record<string, unknown> | null | undefined} payload
+ * @returns {string}
+ */
 function apnsBody(payload) {
     return JSON.stringify({
         aps: { alert: { 'title-loc-key': 'DOTRINO_RING_TITLE', 'loc-key': 'DOTRINO_RING_BODY' }, sound: RING, 'mutable-content': 1 },
@@ -83,6 +101,11 @@ function apnsBody(payload) {
  * Manda el timbre a un token de APNs. Devuelve `{ ok }`, `{ ok:false, disabled:true }` sin
  * llave, o `{ ok:false, gone:true }` si el token ya no vale (la app se desinstaló, o es de
  * otro entorno): el llamante borra la suscripción.
+ */
+/**
+ * @param {import('./types/index.js').ApnsSubscription} sub
+ * @param {Record<string, unknown> | null | undefined} payload
+ * @returns {Promise<import('./types/index.js').RingResult>}
  */
 function ringApns(sub, payload) {
     const k = loadKey();
@@ -103,10 +126,10 @@ function ringApns(sub, payload) {
                 'apns-collapse-id': 'dotrino-ring',
                 'content-type': 'application/json',
             });
-        } catch (e) { resolve({ ok: false, status: 0, body: e.message }); return; }
+        } catch (e) { resolve({ ok: false, status: 0, body: /** @type {Error} */ (e).message }); return; }
         let status = 0, body = '';
         req.setEncoding('utf8');
-        req.on('response', (h) => { status = h[':status']; });
+        req.on('response', (h) => { status = /** @type {number} */ (h[':status']); });
         req.on('data', (c) => { body += c; });
         req.on('end', () => {
             if (status === 200) return resolve({ ok: true });
@@ -119,7 +142,11 @@ function ringApns(sub, payload) {
     });
 }
 
-/** `{ kind:'apns', token, topic, env }` bien formada, o null. */
+/**
+ * `{ kind:'apns', token, topic, env }` bien formada, o null.
+ * @param {any} s  lo que mandó el cliente, sin validar
+ * @returns {import('./types/index.js').ApnsSubscription | null}
+ */
 function parseApnsSubscription(s) {
     if (!s || s.kind !== 'apns') return null;
     if (typeof s.token !== 'string' || !/^[0-9a-f]{64,200}$/i.test(s.token)) return null;

@@ -62,10 +62,15 @@ const REAPPLIED_LIVE = /^TURN_|^PROXY_(PEERS|PUBLIC_URL)$|^FCM_|^APNS_/;
 const { fcmEnabled } = require('./fcm');
 const { apnsEnabled } = require('./apns');
 
+/** @returns {string} */
 function serviceDir() {
     return process.env.VAULT_SERVICE_DIR || path.join(__dirname, 'vault-service');
 }
 
+/**
+ * @param {string} [dir]
+ * @returns {boolean}
+ */
 function isEnrolled(dir = serviceDir()) {
     return fs.existsSync(path.join(dir, 'service-identity.json'));
 }
@@ -79,9 +84,20 @@ function isEnrolled(dir = serviceDir()) {
  * Si no está enrolado no hace nada: el proxy corre con su `.env`, que es el modo
  * normal de un self-hoster.
  */
-function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = console.log, exitDelayMs = 300 } = {}) {
+/**
+ * @param {{
+ *   dir?: string,
+ *   onSecrets: (secrets: Record<string, string>, info: { injected: string[], overridden: string[] }) => void,
+ *   onPending?: (info: { reason?: string, ts: number }) => void,
+ *   log?: (...args: unknown[]) => void,
+ *   exitDelayMs?: number
+ * }} opts
+ * @returns {{ enabled: false } | { enabled: true, stop: () => void }}
+ */
+function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = console.log, exitDelayMs = 300 }) {
     if (!isEnrolled(dir)) return { enabled: false };
     let stopped = false;
+    /** @type {{ stop(): void } | null} */
     let watcher = null;
     (async () => {
         const { waitForSecrets } = await import('@dotrino/vault/service');
@@ -159,6 +175,8 @@ function startVaultSecrets({ dir = serviceDir(), onSecrets, onPending, log = con
  * decisión de seguridad (¿me muero o sigo?) y no se prueba sola dentro de un `await`
  * que necesita vault, proxy y una identidad enrolada.
  *
+ * @param {{ reason?: string, ts: number, via?: string }} update
+ * @param {{ log?: (...args: unknown[]) => void, onPending?: (info: { reason?: string, ts: number }) => void, exitDelayMs?: number, exit?: () => void }} [opts]
  * @returns {'restart'|'stay'} lo que decidió, para el test y para quien lea el log.
  */
 function handleVaultUpdate({ reason, ts, via }, { log = console.log, onPending, exitDelayMs = 300, exit } = {}) {

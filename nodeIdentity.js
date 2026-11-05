@@ -41,11 +41,15 @@ const NODE_ID_LEN = 12;
 // un código cuyo filtro no le corresponde.
 const CODE_HINT_LEN = 2;
 
+/**
+ * @param {unknown} obj
+ * @returns {string}
+ */
 function canonicalStringify(obj) {
     if (typeof obj !== 'object' || obj === null) return JSON.stringify(obj);
     if (Array.isArray(obj)) return '[' + obj.map(canonicalStringify).join(',') + ']';
     const keys = Object.keys(obj).sort();
-    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalStringify(obj[k])).join(',') + '}';
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalStringify(/** @type {Record<string, unknown>} */ (obj)[k])).join(',') + '}';
 }
 
 /**
@@ -57,6 +61,10 @@ function canonicalStringify(obj) {
  * orden (está documentado en dotrino-vault/lib/src/invite.js), así que un id
  * derivado del string CAMBIARÍA al re-exportar la misma llave. El punto
  * comprimido depende solo del material de la llave.
+ */
+/**
+ * @param {string | Record<string, any>} pubkeyJson  JWK (o su JSON)
+ * @returns {Buffer}
  */
 function canonicalPubkeyBytes(pubkeyJson) {
     const jwk = typeof pubkeyJson === 'string' ? JSON.parse(pubkeyJson) : pubkeyJson;
@@ -79,6 +87,10 @@ function canonicalPubkeyBytes(pubkeyJson) {
  * primeros símbolos — irrelevante para colisiones, pero deja de ser cierto que
  * el id es uniforme, y sobre esa uniformidad se apoya el cálculo de molido.
  */
+/**
+ * @param {string | Record<string, any>} pubkey
+ * @returns {string}
+ */
 function deriveNodeId(pubkey) {
     const h = crypto.createHash('sha256').update(canonicalPubkeyBytes(pubkey)).digest();
     let n = BigInt('0x' + h.toString('hex'));
@@ -91,12 +103,20 @@ function deriveNodeId(pubkey) {
     return out;
 }
 
+/**
+ * @param {unknown} id
+ * @returns {id is string}
+ */
 function isValidNodeId(id) {
     return typeof id === 'string' && id.length === NODE_ID_LEN &&
         [...id].every((c) => ALLOWED_CHARS.includes(c));
 }
 
 /** El filtro que viaja en el código corto: los 2 primeros del id de nodo. */
+/**
+ * @param {unknown} nodeId
+ * @returns {string}
+ */
 function hintOf(nodeId) {
     return typeof nodeId === 'string' ? nodeId.slice(0, CODE_HINT_LEN) : '';
 }
@@ -107,6 +127,11 @@ function hintOf(nodeId) {
  * diga) y hace falta que alguien la valide; con ella es una PRUEBA, y no hay
  * nada que admitir.
  */
+/**
+ * @param {unknown} nodeId
+ * @param {string | Record<string, any>} pubkey
+ * @returns {boolean}
+ */
 function nodeIdMatches(nodeId, pubkey) {
     try { return isValidNodeId(nodeId) && deriveNodeId(pubkey) === nodeId; }
     catch (_) { return false; }
@@ -116,6 +141,10 @@ function nodeIdMatches(nodeId, pubkey) {
  * La identidad del nodo a partir del registro que guarda el vault
  * (`service-identity.json` ya parseado). Devuelve null si ese registro no trae
  * un dispositivo con llave: sin ella no se puede federar con firma.
+ */
+/**
+ * @param {import('@dotrino/vault/service').ServiceIdentityRecord | null | undefined} raw
+ * @returns {import('./types/index.js').NodeIdentity | null}
  */
 function identityFromRecord(raw) {
     const device = raw && raw.device;
@@ -157,7 +186,12 @@ function identityFromRecord(raw) {
  * Devuelve null si el nodo no está enrolado (self-hoster sin vault): en ese caso
  * no puede federar con firma y el arranque lo dice claro.
  */
+/**
+ * @param {string} dir
+ * @returns {Promise<import('./types/index.js').NodeIdentity | null>}
+ */
 async function loadNodeIdentity(dir) {
+    /** @type {import('@dotrino/vault/service').ServiceIdentityRecord | null} */
     let raw = null;
     try {
         const { readServiceIdentity } = await import('@dotrino/vault/service');
@@ -166,23 +200,36 @@ async function loadNodeIdentity(dir) {
         // Sin la lib (instalación incompleta) solo se puede leer el formato en
         // claro. Se dice, porque si el archivo está cifrado el nodo se queda sin
         // identidad y hay que saber por qué.
-        console.error('[fed] could not use the vault reader (%s); trying the plain format', e.message);
+        console.error('[fed] could not use the vault reader (%s); trying the plain format', /** @type {Error} */ (e).message);
         raw = readPlainIdentity(dir);
     }
     return identityFromRecord(raw);
 }
 
 /** El archivo tal cual, solo si está en claro. Reserva de `loadNodeIdentity`. */
+/**
+ * @param {string} dir
+ * @returns {import('@dotrino/vault/service').ServiceIdentityRecord | null}
+ */
 function readPlainIdentity(dir) {
     try { return JSON.parse(fs.readFileSync(path.join(dir, 'service-identity.json'), 'utf8')); }
     catch (_) { return null; }
 }
 
+/**
+ * @param {import('node:crypto').JsonWebKey} privateJwk
+ * @returns {import('node:crypto').KeyObject}
+ */
 function privateKeyObject(privateJwk) {
     return crypto.createPrivateKey({ key: privateJwk, format: 'jwk' });
 }
 
 /** Firma un cuerpo con la llave del nodo (ECDSA P-256, ieee-p1363, JSON canónico). */
+/**
+ * @param {{ privateJwk: import('node:crypto').JsonWebKey }} identity
+ * @param {unknown} body
+ * @returns {string} firma base64
+ */
 function signBody(identity, body) {
     return crypto.sign(
         'sha256',
@@ -192,6 +239,12 @@ function signBody(identity, body) {
 }
 
 /** Verifica un cuerpo firmado contra la pubkey (JWK serializado) de un nodo. */
+/**
+ * @param {unknown} body
+ * @param {unknown} signatureBase64
+ * @param {unknown} pubkeyJson  JWK (o su JSON)
+ * @returns {boolean}
+ */
 function verifyBody(body, signatureBase64, pubkeyJson) {
     try {
         const jwk = typeof pubkeyJson === 'string' ? JSON.parse(pubkeyJson) : pubkeyJson;
@@ -219,10 +272,16 @@ function verifyBody(body, signatureBase64, pubkeyJson) {
 class ReplayWindow {
     constructor(windowMs = 5 * 60 * 1000) {
         this.windowMs = windowMs;
+        /** @type {Map<string, number>} */
         this.seen = new Map();  // nonce -> ts
     }
 
-    /** true si la trama es fresca y no repetida (y la registra). */
+    /**
+     * true si la trama es fresca y no repetida (y la registra).
+     * @param {unknown} nonce
+     * @param {number} ts
+     * @returns {boolean}
+     */
     accept(nonce, ts) {
         const now = Date.now();
         if (!Number.isFinite(ts) || Math.abs(now - ts) > this.windowMs) return false;

@@ -22,11 +22,21 @@
 const FRAME_VERSION = 0x01;
 const B64_TAG = '__dotrino_bin_b64';
 
+/**
+ * @param {string} message
+ * @param {string} code
+ * @returns {Error & { code: string }}
+ */
 function withCode(message, code) {
     return Object.assign(new Error(message), { code });
 }
 
 /** La trama binaria: cabecera JSON + cuerpo. */
+/**
+ * @param {object} header
+ * @param {Buffer} body
+ * @returns {Buffer}
+ */
 function encodeFrame(header, body) {
     const head = Buffer.from(JSON.stringify(header), 'utf8');
     const out = Buffer.allocUnsafe(5 + head.length + body.length);
@@ -38,6 +48,10 @@ function encodeFrame(header, body) {
 }
 
 /** `{ header, body }`, o lanza con `code: 'bad-frame'`. */
+/**
+ * @param {import('ws').RawData} data  lo que entrega `ws` en un mensaje binario
+ * @returns {{ header: Record<string, unknown>, body: Buffer }}
+ */
 function decodeFrame(data) {
     const b = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
     if (b.length < 5 || b[0] !== FRAME_VERSION) throw withCode('not a binary frame of a known version', 'bad-frame');
@@ -51,17 +65,30 @@ function decodeFrame(data) {
 }
 
 /** Entrega un mensaje a una conexión como llegó: bytes en trama binaria, texto en JSON. */
+/**
+ * @param {{ send(data: string | Buffer, opts?: { binary?: boolean }): void }} ws
+ * @param {object} header
+ * @param {unknown} body
+ */
 function sendMessage(ws, header, body) {
     if (Buffer.isBuffer(body)) ws.send(encodeFrame(header, body), { binary: true });
     else ws.send(JSON.stringify({ ...header, message: body }));
 }
 
 /** Para un salto que solo admite JSON: los bytes, en base64 marcado. */
+/**
+ * @param {unknown} body
+ * @returns {unknown}
+ */
 function toJson(body) {
     return Buffer.isBuffer(body) ? { [B64_TAG]: body.toString('base64') } : body;
 }
 
 /** El inverso de `toJson`. */
+/**
+ * @param {any} v  JSON recibido
+ * @returns {unknown}
+ */
 function fromJson(v) {
     if (v && typeof v === 'object' && !Array.isArray(v) && typeof v[B64_TAG] === 'string' && Object.keys(v).length === 1) {
         return Buffer.from(v[B64_TAG], 'base64');
@@ -70,6 +97,10 @@ function fromJson(v) {
 }
 
 /** Lo que ocupa un cuerpo, para los topes de la cola. */
+/**
+ * @param {unknown} body
+ * @returns {number}
+ */
 function bodyBytes(body) {
     if (Buffer.isBuffer(body)) return body.length;
     try { return Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body), 'utf8'); }

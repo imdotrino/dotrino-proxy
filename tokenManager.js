@@ -31,13 +31,18 @@ const INSTANCE_BYTES = 16;
 class TokenManager {
     constructor() {
         // Mapa de instancias activas: instance -> {ws, ip, lastActivity}
+        /** @type {Map<string, { ws: import('ws').WebSocket, ip: string, lastActivity: number, assignedAt: number }>} */
         this.activeTokens = new Map();
         // Id del nodo (12 caracteres, derivado de su llave). Lo fija server.js al
         // arrancar. Sin él las instancias no son ruteables entre nodos.
+        /** @type {string | null} */
         this.nodeId = null;
     }
 
-    /** Fija el id de nodo que llevarán las instancias emitidas. */
+    /**
+     * Fija el id de nodo que llevarán las instancias emitidas.
+     * @param {string | null | undefined} nodeId
+     */
     setNodeId(nodeId) {
         this.nodeId = nodeId || null;
     }
@@ -60,6 +65,7 @@ class TokenManager {
 
 
     // Verificar si un token corto ya está en uso
+    /** @param {string} token */
     isTokenInUse(token) {
         return this.activeTokens.has(token);
     }
@@ -80,6 +86,11 @@ class TokenManager {
     }
 
     // Asignar un token corto a una conexión
+    /**
+     * @param {import('ws').WebSocket} ws
+     * @param {string} ip
+     * @returns {string} la instancia asignada
+     */
     assignToken(ws, ip) {
         const token = this.generateUniqueToken();
         const now = Date.now();
@@ -95,22 +106,26 @@ class TokenManager {
     }
 
     // Obtener información de un token corto activo
+    /** @param {string} token */
     getTokenInfo(token) {
         return this.activeTokens.get(token);
     }
 
     // Obtener WebSocket por token
+    /** @param {string} token */
     getWebSocket(token) {
         const info = this.activeTokens.get(token);
         return info ? info.ws : null;
     }
 
     // Verificar si un token corto es válido (existe)
+    /** @param {string} token */
     isValidToken(token) {
         return this.activeTokens.has(token);
     }
 
     // Actualizar la última actividad de un token corto
+    /** @param {string} token */
     updateTokenActivity(token) {
         const tokenInfo = this.activeTokens.get(token);
         if (tokenInfo) {
@@ -121,6 +136,7 @@ class TokenManager {
     }
 
     // Liberar un token corto (cuando se desconecta) - INMEDIATO
+    /** @param {string} token */
     releaseToken(token) {
         if (this.activeTokens.has(token)) {
             this.activeTokens.delete(token);
@@ -145,6 +161,7 @@ class TokenManager {
     cleanupInactiveTokens(maxInactiveMinutes = 10) {
         const now = Date.now();
         const maxInactiveMs = maxInactiveMinutes * 60 * 1000;
+        /** @type {string[]} */
         const inactiveTokens = [];
 
         for (const [token, info] of this.activeTokens) {
@@ -157,7 +174,7 @@ class TokenManager {
         
         // Liberar tokens inactivos
         inactiveTokens.forEach(token => {
-            console.log(`[tokens] releasing idle token ${token} (idle for ${Math.floor((now - this.activeTokens.get(token).lastActivity) / 60000)} min)`);
+            console.log(`[tokens] releasing idle token ${token} (idle for ${Math.floor((now - /** @type {{ lastActivity: number }} */ (this.activeTokens.get(token)).lastActivity) / 60000)} min)`);
             this.activeTokens.delete(token);
         });
 

@@ -24,22 +24,35 @@ const DEFAULT_PATH = path.resolve(process.cwd(), 'usage-stats.json');
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_RETENTION_DAYS = 30;
 
+/**
+ * Contadores de una IP.
+ * @typedef {{ messages: number, hardLimits: number, softLimits: number, firstSeen: number, lastSeen: number }} IpStats
+ */
+
+/**
+ * @param {{ filePath?: string, intervalMs?: number | string, retentionDays?: number | string }} [options]
+ */
 function createUsageStats(options = {}) {
   const filePath = options.filePath
     || process.env.USAGE_STATS_FILE
     || DEFAULT_PATH;
-  const intervalMs = Number.parseInt(
+  // String(): parseInt ya convierte su argumento; aquí solo se hace visible.
+  const intervalMs = Number.parseInt(String(
     options.intervalMs != null ? options.intervalMs
       : process.env.USAGE_STATS_INTERVAL != null ? process.env.USAGE_STATS_INTERVAL
-      : DEFAULT_INTERVAL_MS, 10
+      : DEFAULT_INTERVAL_MS), 10
   );
-  const retentionDays = Number.parseInt(
+  const retentionDays = Number.parseInt(String(
     options.retentionDays != null ? options.retentionDays
       : process.env.USAGE_STATS_RETENTION_DAYS != null ? process.env.USAGE_STATS_RETENTION_DAYS
-      : DEFAULT_RETENTION_DAYS, 10
+      : DEFAULT_RETENTION_DAYS), 10
   );
 
   const startedAt = Date.now();
+  /**
+   * @type {{ startedAt: number, lastFlushAt: number, perIp: Record<string, IpStats>, perOp: Record<string, number>,
+   *   totalConnections: number, totalMessages: number, totalHardLimits: number, totalSoftLimits: number, retentionDays?: number }}
+   */
   const data = {
     startedAt,
     lastFlushAt: 0,
@@ -58,9 +71,13 @@ function createUsageStats(options = {}) {
       Object.assign(data, prev, { startedAt });  // mantiene contadores, refresca startedAt
     }
   } catch (e) {
-    console.warn('[usage-stats] could not load previous file:', e.message);
+    console.warn('[usage-stats] could not load previous file:', /** @type {Error} */ (e).message);
   }
 
+  /**
+   * @param {string | null | undefined} ip
+   * @returns {IpStats | null}
+   */
   function ensureIp(ip) {
     if (!ip) return null;
     let s = data.perIp[ip];
@@ -71,12 +88,14 @@ function createUsageStats(options = {}) {
     return s;
   }
 
+  /** @param {string | null | undefined} ip */
   function recordConnection(ip) {
     data.totalConnections += 1;
     const s = ensureIp(ip);
     if (s) s.lastSeen = Date.now();
   }
 
+  /** @param {string | null | undefined} ip @param {string | null} [op] */
   function recordMessage(ip, op) {
     data.totalMessages += 1;
     const s = ensureIp(ip);
@@ -84,6 +103,7 @@ function createUsageStats(options = {}) {
     if (op) data.perOp[op] = (data.perOp[op] || 0) + 1;
   }
 
+  /** @param {string | null | undefined} ip @param {string | null} [op] */
   function recordHardLimit(ip, op) {
     data.totalHardLimits += 1;
     const s = ensureIp(ip);
@@ -95,6 +115,7 @@ function createUsageStats(options = {}) {
     flushSoon();  // hard limits son raros y vale la pena flush rápido
   }
 
+  /** @param {string | null | undefined} ip @param {string | null} [op] */
   function recordSoftLimit(ip, op) {
     data.totalSoftLimits += 1;
     const s = ensureIp(ip);
@@ -116,6 +137,8 @@ function createUsageStats(options = {}) {
    * Se olvida a quien no ha vuelto. Va en el `flush` y no en un temporizador aparte
    * porque así se aplica siempre que se escribe: no hay forma de que el archivo del
    * disco tenga algo más viejo que el plazo.
+   * @param {number} now
+   * @returns {number} cuántas IPs se olvidaron
    */
   function forgetOld(now) {
     const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
@@ -133,7 +156,7 @@ function createUsageStats(options = {}) {
     try {
       fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
     } catch (e) {
-      console.warn('[usage-stats] flush failed:', e.message);
+      console.warn('[usage-stats] flush failed:', /** @type {Error} */ (e).message);
     }
   }
 

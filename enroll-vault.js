@@ -13,6 +13,7 @@
  */
 const { serviceDir, NS } = require('./vaultSecrets');
 
+/** @returns {Promise<void>} */
 async function main() {
     const arg = process.argv[2];
     if (!arg) {
@@ -48,4 +49,4 @@ async function main() {
     console.log('  dotrino-vault secret set proxy TURN_KEY_API_TOKEN <token>');
 }
 
-main().catch((e) => { console.error('enroll failed:', e.message); process.exit(1); });
+main().catch((e) => { console.error('enroll failed:', /** @type {Error} */ (e).message); process.exit(1); });

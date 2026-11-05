@@ -35,11 +35,23 @@ const DEFAULT_MAX_TRACKED = 50000;         // tope de pubkeys distintas en memor
 const DEFAULT_MAX_INFLIGHT = 50;           // fetches concurrentes a Cloudflare
 const DEFAULT_FETCH_TIMEOUT_MS = 10000;    // un fetch colgado no debe retener un slot para siempre
 
+/**
+ * @param {number} n
+ * @returns {number}
+ */
 function clampTtl(n) {
     if (!Number.isFinite(n) || n <= 0) return DEFAULT_TTL_S;
     return Math.min(86400, Math.max(60, Math.floor(n)));
 }
 
+/**
+ * @param {{
+ *   keyId?: string, apiToken?: string, ttlSeconds?: number | string, maxPerHour?: number | string,
+ *   globalMaxPerHour?: number | string, maxTracked?: number | string, maxInFlight?: number | string,
+ *   fetchTimeoutMs?: number | string, apiBase?: string, fetchImpl?: typeof fetch | null,
+ *   usage?: ReturnType<typeof createTurnUsage>, onAlert?: (ev: import('./types/index.js').TurnUsageEvent) => void
+ * }} [opts]
+ */
 function createTurnIssuer(opts = {}) {
     const keyId = opts.keyId ?? process.env.TURN_KEY_ID ?? '';
     const apiToken = opts.apiToken ?? process.env.TURN_KEY_API_TOKEN ?? '';
@@ -58,18 +70,28 @@ function createTurnIssuer(opts = {}) {
     if (enabled) usage.start();
 
     // pubkey -> { iceServers, expiresAt } (se reusa hasta ~75% del TTL)
+    /** @type {Map<string, { iceServers: import('./types/index.js').IceServer[], expiresAt: number }>} */
     const cache = new Map();
     // pubkey -> [timestamps de emisión en la última hora]
+    /** @type {Map<string, number[]>} */
     const issued = new Map();
     // pubkey -> Promise en vuelo (colapsa pedidos concurrentes de la misma pubkey)
+    /** @type {Map<string, Promise<import('./types/index.js').TurnIssueResult>>} */
     const inFlight = new Map();
     // Ventana deslizante GLOBAL de emisiones reales a Cloudflare (todas las pubkeys).
+    /** @type {number[]} */
     let globalIssues = [];
     // Barrido periódico: sin esto, las pubkeys que piden UNA vez y no vuelven
     // quedan en cache/issued para siempre (la poda perezosa solo toca la pubkey
     // que re-pregunta) → crecimiento de memoria ilimitado con pubkeys rotadas.
+    /** @type {ReturnType<typeof setInterval> | null} */
     let sweepTimer = null;
 
+    /**
+     * @param {string} pubkey
+     * @param {number} now
+     * @returns {number[]}
+     */
     function pruneIssued(pubkey, now) {
         const list = issued.get(pubkey);
         if (!list) return [];
@@ -81,6 +103,7 @@ function createTurnIssuer(opts = {}) {
 
     // Barrido global: expira entradas de cache vencidas y ventanas issued vacías,
     // y aplica el tope de tamaño (evicción de las más viejas primero).
+    /** @param {number} [now] */
     function sweep(now = Date.now()) {
         for (const [pk, v] of cache) if (now >= v.expiresAt) cache.delete(pk);
         globalIssues = globalIssues.filter((t) => now - t < HOUR_MS);
@@ -98,13 +121,17 @@ function createTurnIssuer(opts = {}) {
 
     // Normaliza la respuesta de Cloudflare ({iceServers:{urls,username,credential}})
     // a un array estándar de RTCIceServer.
+    /**
+     * @param {any} body  respuesta JSON de Cloudflare
+     * @returns {import('./types/index.js').IceServer[] | null}
+     */
     function normalizeIceServers(body) {
         const ice = body && body.iceServers;
         if (!ice) return null;
         const list = Array.isArray(ice) ? ice : [ice];
         const out = list
-            .filter((s) => s && s.urls)
-            .map((s) => ({
+            .filter((/** @type {any} */ s) => s && s.urls)
+            .map((/** @type {any} */ s) => ({
                 urls: s.urls,
                 ...(s.username ? { username: s.username } : {}),
                 ...(s.credential ? { credential: s.credential } : {})
@@ -119,7 +146,7 @@ function createTurnIssuer(opts = {}) {
         const timer = ac ? setTimeout(() => ac.abort(), fetchTimeoutMs) : null;
         let res;
         try {
-            res = await fetchImpl(`${apiBase}/${keyId}/credentials/generate`, {
+            res = await /** @type {typeof fetch} */ (fetchImpl)(`${apiBase}/${keyId}/credentials/generate`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${apiToken}`,
@@ -143,8 +170,8 @@ function createTurnIssuer(opts = {}) {
 
     /**
      * Emite (o reusa de cache) credenciales para una pubkey identificada.
-     * @returns {Promise<{iceServers:any[], expiresAt:number, ttl:number}
-     *                   |{limited:true, reason:'turn-quota'|'turn-daily-cap'|'turn-usage-unknown', retry_after_ms:number}>}
+     * @param {string} pubkey
+     * @returns {Promise<import('./types/index.js').TurnIssueResult>}
      */
     async function issue(pubkey) {
         // Antes que la caché: con el tope alcanzado tampoco se reparte una credencial ya emitida.

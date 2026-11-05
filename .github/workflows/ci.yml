@@ -1,0 +1,25 @@
+# Tipos y pruebas en cada push y PR. El proxio se despliega por webhook
+# (dotrino-deploy-listener), no desde aquí: esto deja el commit en ROJO si algo no pasa.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm test

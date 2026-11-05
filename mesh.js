@@ -36,6 +36,10 @@ const MAX_FRAME_BYTES = Number(process.env.PROXY_MAX_FRAME_BYTES || 1024 * 1024)
  * Una trama de la malla en el cable: JSON, o BINARIA si lleva un mensaje en bytes (body.js).
  * En base64 una parte de 768 KB ocupa más de 1 MB y no cabe en la trama; así viaja en crudo.
  */
+/**
+ * @param {import('./types/index.js').MeshFrame} obj
+ * @returns {string | Buffer}
+ */
 function serializeFrame(obj) {
     const m = obj && obj.payload && obj.payload.message;
     if (!Buffer.isBuffer(m)) return JSON.stringify(obj);
@@ -43,15 +47,20 @@ function serializeFrame(obj) {
     return encodeFrame({ ...obj, payload: rest, binaryMessage: true }, m);
 }
 
-/** El inverso de `serializeFrame`. Lanza si no es una trama válida. */
+/**
+ * El inverso de `serializeFrame`. Lanza si no es una trama válida.
+ * @param {import('ws').RawData} raw
+ * @param {boolean} isBinary
+ * @returns {import('./types/index.js').MeshFrame}
+ */
 function parseFrame(raw, isBinary) {
     if (!isBinary) return JSON.parse(raw.toString());
     const { header, body } = decodeFrame(raw);
     if (header.binaryMessage && header.payload && typeof header.payload === 'object') {
-        header.payload.message = Buffer.from(body);
+        /** @type {Record<string, unknown>} */ (header.payload).message = Buffer.from(body);
     }
     delete header.binaryMessage;
-    return header;
+    return /** @type {import('./types/index.js').MeshFrame} */ (/** @type {unknown} */ (header));
 }
 
 const S2S_PATH = '/_s2s';
@@ -71,6 +80,7 @@ const HELLO_TIMEOUT_MS = 10000;
  * Al pasarse NO se corta el enlace —eso dejaría que una operación tonta rompa
  * toda la federación—: se descarta la trama y se cuenta.
  */
+/** @type {Record<string, import('./types/index.js').Limit>} */
 const S2S_LIMITS = {
     // Tráfico normal entre usuarios de nodos distintos: generoso, es agregado
     // de TODOS los usuarios de ese peer.
@@ -88,6 +98,10 @@ const S2S_LIMITS = {
     __default__:   { burst: 100, ratePerSec: 25 }
 };
 
+/**
+ * @param {string} op
+ * @returns {import('./types/index.js').Limit}
+ */
 function s2sLimitFor(op) {
     const envBurst = Number.parseInt(process.env[`S2S_LIMIT_${String(op).toUpperCase().replace(/-/g, '_')}_BURST`] || '', 10);
     const envRate = Number.parseFloat(process.env[`S2S_LIMIT_${String(op).toUpperCase().replace(/-/g, '_')}_RATE`] || '');
@@ -100,8 +114,15 @@ function s2sLimitFor(op) {
 
 /** Cubetas por operación para UN peer. */
 class PeerBuckets {
-    constructor(now = Date.now()) { this.buckets = new Map(); this.dropped = 0; this.now = now; }
+    constructor(now = Date.now()) {
+        /** @type {Map<string, { tokens: number, burst: number, ratePerSec: number, last: number }>} */
+        this.buckets = new Map(); this.dropped = 0; this.now = now; }
 
+    /**
+     * @param {string} op
+     * @param {number} [now]
+     * @returns {boolean}
+     */
     allow(op, now = Date.now()) {
         let b = this.buckets.get(op);
         if (!b) {
@@ -128,22 +149,39 @@ const BACKOFF_MAX_MS = 10000;
 
 /** Conexión SALIENTE hacia un peer. Reconecta sola y reenvía lo no acusado. */
 class MeshLink {
+    /**
+     * @param {{
+     *   url: string,
+     *   identity: import('./types/index.js').NodeIdentity | null,
+     *   registry: import('./peers.js').PeerRegistry,
+     *   onFrame: (frame: import('./types/index.js').MeshFrame, link: MeshLink) => void,
+     *   log?: (...args: unknown[]) => void
+     * }} opts
+     */
     constructor({ url, identity, registry, onFrame, log = () => {} }) {
         this.url = url;
         this.identity = identity;
         this.registry = registry;
         this.onFrame = onFrame;
         this.log = log;
+        /** @type {import('./types/index.js').MeshSocket | null} */
         this.ws = null;
         this.ready = false;
         this.seq = 0;
+        /** @type {Map<number, import('./types/index.js').MeshFrame>} */
         this.retain = new Map();   // seq -> frame pendiente de acuse
         this.backoff = BACKOFF_MIN_MS;
         this.stopped = false;
+        /** @type {Set<ReturnType<typeof setTimeout>>} */
         this.timers = new Set();
+        /** @type {{ sent: number, acked: number, resent: number, reconnects: number, tooBig?: number }} */
         this.stats = { sent: 0, acked: 0, resent: 0, reconnects: 0 };
     }
 
+    /**
+     * @param {() => void} fn
+     * @param {number} ms
+     */
     _timer(fn, ms) {
         const t = setTimeout(() => { this.timers.delete(t); fn(); }, ms);
         if (t.unref) t.unref();
@@ -172,6 +210,7 @@ class MeshLink {
 
     _connect() {
         if (this.stopped || !this.identity) return;
+        /** @type {import('./types/index.js').MeshSocket} */
         let ws;
         try { ws = new WebSocket(this.wsUrl(), { handshakeTimeout: HELLO_TIMEOUT_MS }); }
         catch (e) { this._scheduleReconnect(); return; }
@@ -184,8 +223,10 @@ class MeshLink {
         ws.on('message', (raw, isBinary) => {
             let f; try { f = parseFrame(raw, isBinary); } catch (_) { return; }
             if (f.t === 'challenge') {
-                const body = { v: 1, op: 's2s-hello', from: this.identity.pubkey, nodeId: this.identity.nodeId, nonce: f.nonce, ts: Date.now() };
-                this._raw({ t: 'hello', body, signature: signBody(this.identity, body) });
+                // `_connect` no arranca sin identidad.
+                const identity = /** @type {import('./types/index.js').NodeIdentity} */ (this.identity);
+                const body = { v: 1, op: 's2s-hello', from: identity.pubkey, nodeId: identity.nodeId, nonce: f.nonce, ts: Date.now() };
+                this._raw({ t: 'hello', body, signature: signBody(identity, body) });
                 return;
             }
             if (f.t === 'ready') {
@@ -196,7 +237,7 @@ class MeshLink {
                 this._flush();
                 return;
             }
-            if (f.t === 'ack') { this._onAck(f.seq); return; }
+            if (f.t === 'ack') { this._onAck(/** @type {number} */ (f.seq)); return; }
             if (f.t === 'msg') { this.onFrame(f, this); return; }
         });
 
@@ -225,6 +266,10 @@ class MeshLink {
         this._timer(() => this._connect(), delay);
     }
 
+    /**
+     * @param {import('./types/index.js').MeshFrame} obj
+     * @returns {boolean} si salió
+     */
     _raw(obj) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
         const data = serializeFrame(obj);
@@ -240,6 +285,7 @@ class MeshLink {
         try { this.ws.send(data); return true; } catch (_) { return false; }
     }
 
+    /** @param {number} seq */
     _onAck(seq) {
         if (this.retain.delete(seq)) this.stats.acked++;
     }
@@ -256,6 +302,12 @@ class MeshLink {
      * sale en cuanto vuelve (hasta RETAIN_MAX; más allá se tira lo más viejo,
      * que es preferible a crecer sin límite con un peer muerto).
      */
+    /**
+     * @param {string} op
+     * @param {unknown} payload
+     * @param {{ retain?: boolean }} [opts]
+     * @returns {number} el seq de la trama
+     */
     send(op, payload, { retain = true } = {}) {
         const seq = ++this.seq;
         const frame = { t: 'msg', seq, op, payload };
@@ -263,7 +315,7 @@ class MeshLink {
         // sentido guardarlo, porque para cuando vuelva ya no sirve.
         if (retain) {
             if (this.retain.size >= RETAIN_MAX) {
-                const oldest = this.retain.keys().next().value;
+                const oldest = /** @type {number} */ (this.retain.keys().next().value);
                 this.retain.delete(oldest);
             }
             this.retain.set(seq, frame);
@@ -283,9 +335,10 @@ class MeshLink {
 
 /** La malla completa: enlaces salientes + atención de los entrantes. */
 class Mesh {
+    /** @param {import('./types/index.js').MeshOptions} opts */
     constructor({ urls = [], identity = null, registry, onDeliver, onRelay, onRelayFailed, onPeerGone,
                   onPairRedeem, onPairResult, onChanOp, onChanResult, onChanEvent, onEncPub,
-                  log = console.log } = {}) {
+                  log = console.log }) {
         this.identity = identity;
         this.registry = registry;
         this.onDeliver = onDeliver;
@@ -299,8 +352,12 @@ class Mesh {
         this.onChanEvent = onChanEvent || (() => {});
         this.onEncPub = onEncPub || (() => {});
         this.log = log;
+        /** @type {Map<string, MeshLink>} */
         this.links = new Map();     // url -> MeshLink
+        /** @type {Map<string, import('./types/index.js').MeshSocket>} */
         this.inbound = new Map();   // pubkey del peer -> ws entrante
+        /** @type {number | undefined} */
+        this._lastKick = undefined;
         this.started = false;       // para que `setUrls` sepa si arrancar lo nuevo
         for (const url of urls) {
             this.links.set(url, new MeshLink({
@@ -316,6 +373,7 @@ class Mesh {
      * enlaces: la recibieron por constructor cuando todavía era null y firman
      * con ella. Se llama antes de `start()`, nunca con enlaces vivos.
      */
+    /** @param {import('./types/index.js').NodeIdentity | null} identity */
     setIdentity(identity) {
         this.identity = identity;
         for (const l of this.links.values()) l.identity = identity;
@@ -328,6 +386,7 @@ class Mesh {
      * falta se crea, y el que ya estaba NO se toca — reconectarlo tiraría las
      * tramas que tiene retenidas esperando acuse.
      */
+    /** @param {string[]} [urls] */
     setUrls(urls = []) {
         const want = new Set(urls);
         for (const [url, link] of [...this.links]) {
@@ -368,6 +427,11 @@ class Mesh {
      * Manda una entrega a todos los peers por la malla. Devuelve cuántos enlaces
      * la aceptaron EN VIVO (los caídos la guardan para cuando vuelvan).
      */
+    /**
+     * @param {unknown} payload
+     * @param {{ retain?: boolean }} [opts]
+     * @returns {number}
+     */
     broadcastDeliver(payload, opts = {}) {
         let live = 0;
         for (const l of this.links.values()) {
@@ -377,6 +441,10 @@ class Mesh {
         return live;
     }
 
+    /**
+     * @param {import('./types/index.js').MeshFrame} frame
+     * @param {import('./types/index.js').MeshReplyChannel} link
+     */
     _handleFrame(frame, link) {
         if (frame.op === 'deliver') this.onDeliver(frame.payload, link);
         else if (frame.op === 'relay') this.onRelay(frame.payload, link);
@@ -401,6 +469,10 @@ class Mesh {
      * Retenido (`retain:true`) a propósito: con el enlace caído se guarda y sale al
      * volver. Es un dato duradero, no una entrega que caduque con las conexiones.
      */
+    /**
+     * @param {unknown} payload
+     * @returns {number}
+     */
     broadcastEncPub(payload) {
         let live = 0;
         for (const l of this.links.values()) {
@@ -410,7 +482,11 @@ class Mesh {
         return live;
     }
 
-    /** Enlace SALIENTE hacia el nodo con esa pubkey (o null). */
+    /**
+     * Enlace SALIENTE hacia el nodo con esa pubkey (o null).
+     * @param {string} nodePubkey
+     * @returns {MeshLink | null}
+     */
     linkForNode(nodePubkey) {
         const peer = this.registry.byNodePubkey(nodePubkey);
         if (!peer) return null;
@@ -431,6 +507,13 @@ class Mesh {
      * Lo retenido (`retain:true`, el default) sí se encola con el enlace caído: para eso
      * está, y sale en cuanto vuelve.
      */
+    /**
+     * @param {string} nodePubkey
+     * @param {string} op
+     * @param {unknown} payload
+     * @param {{ retain?: boolean }} [opts]
+     * @returns {boolean}
+     */
     sendTo(nodePubkey, op, payload, opts = {}) {
         const link = this.linkForNode(nodePubkey);
         if (!link) return false;
@@ -447,6 +530,11 @@ class Mesh {
      * cuando vuelva significaría soltarlo minutos después, cuando el destinatario
      * probablemente ya no está — y quien envía prefiere enterarse ahora
      * (`failed`) a que llegue tarde y fuera de contexto.
+     */
+    /**
+     * @param {string} nodePubkey
+     * @param {unknown} payload
+     * @returns {boolean}
      */
     relayTo(nodePubkey, payload) {
         const link = this.linkForNode(nodePubkey);
@@ -470,6 +558,10 @@ class Mesh {
     }
 
     /** ¿Es una conexión entrante de la malla? */
+    /**
+     * @param {unknown} url
+     * @returns {boolean}
+     */
     static isMeshPath(url) {
         return typeof url === 'string' && url.split('?')[0] === S2S_PATH;
     }
@@ -479,9 +571,11 @@ class Mesh {
      * verificación contra la pubkey pineada → ready. Mientras no complete el
      * handshake no se procesa ninguna otra trama.
      */
+    /** @param {import('./types/index.js').MeshSocket} ws */
     handleInbound(ws) {
         if (!this.identity) { try { ws.close(1011, 'node without identity'); } catch (_) {} return; }
         const nonce = newNonce();
+        /** @type {import('./types/index.js').Peer | null} */
         let peer = null;
         const buckets = new PeerBuckets();
 
@@ -490,13 +584,14 @@ class Mesh {
         }, HELLO_TIMEOUT_MS);
         if (timer.unref) timer.unref();
 
-        const send = (o) => { try { ws.send(serializeFrame(o)); } catch (_) {} };
+        const send = (/** @type {import('./types/index.js').MeshFrame} */ o) => { try { ws.send(serializeFrame(o)); } catch (_) {} };
 
         // Canal de RESPUESTA por el mismo socket entrante. Hace falta porque hay
         // operaciones que piden una contestación (el canje de una cita, por
         // ejemplo) y de este lado no hay un MeshLink: solo el socket que abrió el
         // otro. El que discó ya sabe procesar `t:'msg'` que le llegan de vuelta.
         let replySeq = 0;
+        /** @type {import('./types/index.js').MeshReplyChannel} */
         const replyChannel = {
             send: (op, payload) => send({ t: 'msg', seq: ++replySeq, op, payload })
         };
@@ -537,7 +632,7 @@ class Mesh {
                 if (prev && prev !== ws) { try { prev.close(1000, 'reemplazada'); } catch (_) {} }
                 this.inbound.set(known.pubkey, ws);
                 ws.meshPeer = known;
-                send({ t: 'ready', nodeId: this.identity.nodeId });
+                send({ t: 'ready', nodeId: /** @type {import('./types/index.js').NodeIdentity} */ (this.identity).nodeId }); // comprobada al entrar
                 this.log(`[mesh] incoming link accepted from ${known.url} (id ${known.nodeId})`);
                 return;
             }
@@ -548,7 +643,7 @@ class Mesh {
             // Límite por peer y por operación. Se acusa igual la trama descartada:
             // el acuse es de RECEPCIÓN, y si no se acusara el emisor la reenviaría
             // para siempre, convirtiendo el límite en un bucle infinito.
-            if (!buckets.allow(f.op)) {
+            if (!buckets.allow(/** @type {string} */ (f.op))) {
                 if (buckets.dropped === 1 || buckets.dropped % 100 === 0) {
                     this.log(`[mesh] s2s limit: dropped ${buckets.dropped} frames from ${peer.url} (last: ${f.op})`);
                 }
@@ -575,6 +670,7 @@ class Mesh {
     }
 
     stats() {
+        /** @type {Record<string, object>} */
         const out = {};
         for (const [url, l] of this.links) {
             out[url] = { ready: l.ready, pending: l.pendingCount(), ...l.stats };

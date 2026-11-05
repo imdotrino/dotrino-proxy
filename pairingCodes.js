@@ -44,10 +44,14 @@ const MAX_CODES = 10000;
 const normalizeCode = normalize;
 
 class PairingCodes {
+    /** @param {{ ttlMs?: number }} [opts] */
     constructor({ ttlMs = DEFAULT_TTL_MS } = {}) {
         this.ttlMs = ttlMs;
+        /** @type {Map<string, { instance: string, pubkey: string | null, expiresAt: number }>} */
         this.codes = new Map();          // code -> {instance, pubkey, expiresAt}
+        /** @type {Map<string, string>} */
         this.byInstance = new Map();     // instance -> code (una cita viva por conexión)
+        /** @type {ReturnType<typeof setInterval> | null} */
         this.cleanupTimer = null;
     }
 
@@ -63,6 +67,10 @@ class PairingCodes {
      * el filtro `PU` y el cuerpo `TAXX` sale `PUTAXX`, y mirando solo el cuerpo
      * eso pasaba limpio.
      */
+    /**
+     * @param {string} hint
+     * @returns {string}
+     */
     _decentBody(hint) {
         for (let i = 0; i < 20; i++) {
             const body = this._randomBody();
@@ -73,6 +81,7 @@ class PairingCodes {
 
     /**
      * Crea (o renueva) la cita de una conexión.
+     * @param {{ instance: string, pubkey?: string | null, hint: string, ttlMs?: number }} opts
      * @returns {{code:string, expiresAt:number}|null} null si no hay prefijo de nodo.
      */
     create({ instance, pubkey = null, hint, ttlMs }) {
@@ -103,6 +112,10 @@ class PairingCodes {
      * Un solo uso: si no, un código que circuló por un grupo de chat sigue
      * sirviendo para colarse después.
      */
+    /**
+     * @param {unknown} rawCode
+     * @returns {{ instance: string, pubkey: string | null, code?: undefined, error?: undefined } | { code: string, error: string, instance?: undefined, pubkey?: undefined }}
+     */
     redeem(rawCode) {
         const code = normalizeCode(rawCode);
         if (!code) return { code: 'empty-code', error: 'empty code' };
@@ -119,6 +132,10 @@ class PairingCodes {
     }
 
     /** Mira a quién apunta una cita SIN quemarla (para el nodo dueño). */
+    /**
+     * @param {unknown} rawCode
+     * @returns {{ instance: string, pubkey: string | null, expiresAt: number } | null}
+     */
     peek(rawCode) {
         const code = normalizeCode(rawCode);
         if (!code) return null;
@@ -128,6 +145,10 @@ class PairingCodes {
     }
 
     /** Suelta la cita de una conexión (al desconectarse, o al pedir otra). */
+    /**
+     * @param {string} instance
+     * @returns {boolean}
+     */
     release(instance) {
         const code = this.byInstance.get(instance);
         if (!code) return false;

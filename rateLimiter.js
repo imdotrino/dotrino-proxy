@@ -16,6 +16,7 @@
 // (RATE_LIMIT_BAN_DISABLED): el hard-limit solo descarta ESE mensaje y cuenta
 // el evento en usageStats; la conexión se mantiene viva. Override por env
 // RATE_LIMIT_<TYPE>_BURST / _RATE.
+/** @type {Record<string, import('./types/index.js').Limit>} */
 const DEFAULT_LIMITS = {
   // Per-type token buckets: { burst, ratePerSec }
   message:        { burst: 120, ratePerSec: 60 },
@@ -39,6 +40,12 @@ const DEFAULT_LIMITS = {
 const DEFAULT_HARD_MULTIPLIER = 2;
 const DEFAULT_BAN_MS = 30 * 60 * 1000;
 
+/**
+ * @param {string} envBurst
+ * @param {string} envRate
+ * @param {import('./types/index.js').Limit} fallback
+ * @returns {import('./types/index.js').Limit}
+ */
 function readLimit(envBurst, envRate, fallback) {
   const burst = Number.parseInt(process.env[envBurst] || '', 10);
   const rate  = Number.parseFloat(process.env[envRate] || '');
@@ -48,7 +55,9 @@ function readLimit(envBurst, envRate, fallback) {
   };
 }
 
+/** @returns {Record<string, import('./types/index.js').Limit>} */
 function buildEffectiveLimits() {
+  /** @type {Record<string, import('./types/index.js').Limit>} */
   const merged = {};
   for (const type of Object.keys(DEFAULT_LIMITS)) {
     const fb = DEFAULT_LIMITS[type];
@@ -70,10 +79,30 @@ function buildEffectiveLimits() {
 // Compartir el reloj no cambia nada: rellenar es lineal y con tope, así que rellenar el
 // nivel de aviso en el momento del corte —sin gastar de él— da lo mismo que rellenarlo
 // después de una vez.
+/**
+ * Cubeta de un token: fichas del tramo blando (`s`), del duro (`h`) y cuándo se rellenó (`t`).
+ * @typedef {{ s: number, h: number, t: number }} Bucket
+ */
+
+/**
+ * Los dos tramos de un tipo de mensaje.
+ * @typedef {{ soft: import('./types/index.js').Limit, hard: import('./types/index.js').Limit }} LimitPair
+ */
+
+/**
+ * @param {LimitPair} lim
+ * @param {number} now
+ * @returns {Bucket}
+ */
 function makeBucket(lim, now) {
   return { s: lim.soft.burst, h: lim.hard.burst, t: now };
 }
 
+/**
+ * @param {Bucket} bucket
+ * @param {LimitPair} lim
+ * @param {number} now
+ */
 function refill(bucket, lim, now) {
   if (now <= bucket.t) return;
   const elapsedSec = (now - bucket.t) / 1000;
@@ -83,6 +112,12 @@ function refill(bucket, lim, now) {
 }
 
 // Gasta una ficha del nivel `tier` ('s' o 'h'). Devuelve 0 si había, o cuántos ms faltan.
+/**
+ * @param {Bucket} bucket
+ * @param {'s' | 'h'} tier
+ * @param {number} rate
+ * @returns {number} 0 si había ficha; si no, ms hasta la próxima
+ */
 function take(bucket, tier, rate) {
   if (bucket[tier] >= 1) {
     bucket[tier] -= 1;
@@ -91,6 +126,10 @@ function take(bucket, tier, rate) {
   return Math.ceil(((1 - bucket[tier]) / rate) * 1000);
 }
 
+/**
+ * @param {{ disabled?: boolean, limits?: Record<string, import('./types/index.js').Limit>, hardMultiplier?: number | string, banMs?: number | string, banDisabled?: boolean } | null} [options]
+ * @returns {import('./types/index.js').RateLimiter}
+ */
 function createRateLimiter(options) {
   options = options || {};
   if (process.env.RATE_LIMIT_DISABLED === '1' || options.disabled) {
@@ -98,15 +137,16 @@ function createRateLimiter(options) {
   }
 
   const softLimits = options.limits || buildEffectiveLimits();
-  const hardMultiplier = Number.parseFloat(
+  // String(): parseFloat/parseInt ya convierten su argumento; aquí solo se hace visible.
+  const hardMultiplier = Number.parseFloat(String(
     options.hardMultiplier != null ? options.hardMultiplier
       : process.env.RATE_LIMIT_HARD_MULTIPLIER != null ? process.env.RATE_LIMIT_HARD_MULTIPLIER
-      : DEFAULT_HARD_MULTIPLIER
+      : DEFAULT_HARD_MULTIPLIER)
   );
-  const banMs = Number.parseInt(
+  const banMs = Number.parseInt(String(
     options.banMs != null ? options.banMs
       : process.env.RATE_LIMIT_BAN_MS != null ? process.env.RATE_LIMIT_BAN_MS
-      : DEFAULT_BAN_MS, 10
+      : DEFAULT_BAN_MS), 10
   );
   // Bans deshabilitados por defecto: en su lugar contamos eventos en
   // un archivo de stats (USAGE_STATS_FILE) para revisar uso sospechoso
@@ -115,6 +155,7 @@ function createRateLimiter(options) {
     ? !!options.banDisabled
     : process.env.RATE_LIMIT_BAN_DISABLED !== '0';
 
+  /** @type {Record<string, import('./types/index.js').Limit>} */
   const hardLimits = {};
   for (const k of Object.keys(softLimits)) {
     hardLimits[k] = {
@@ -124,13 +165,18 @@ function createRateLimiter(options) {
   }
 
   // Límites de los dos niveles juntos, por tipo: `{ soft, hard }`.
+  /** @type {Record<string, LimitPair>} */
   const pairs = {};
   for (const k of Object.keys(softLimits)) pairs[k] = { soft: softLimits[k], hard: hardLimits[k] };
+  /** @param {string} type */
   const limitsFor = (type) => pairs[type] || pairs.message;
 
+  /** @type {Map<string, { global: Bucket, types: Map<string, Bucket> }>} */
   const tokens = new Map();
+  /** @type {Map<string, number>} */
   const ipBans = new Map();
 
+  /** @param {string} token @param {number} now */
   function getOrCreate(token, now) {
     let entry = tokens.get(token);
     if (!entry) {
@@ -140,6 +186,13 @@ function createRateLimiter(options) {
     return entry;
   }
 
+  /**
+   * @param {{ global: Bucket, types: Map<string, Bucket> }} entry
+   * @param {string} type
+   * @param {LimitPair} lim
+   * @param {number} now
+   * @returns {Bucket}
+   */
   function getTypeBucket(entry, type, lim, now) {
     let bucket = entry.types.get(type);
     if (!bucket) {
@@ -149,14 +202,16 @@ function createRateLimiter(options) {
     return bucket;
   }
 
+  /** @type {import('./types/index.js').RateLimiter['consume']} */
   function consume(token, ip, type) {
     if (!token) return { status: 'ok' };
     const now = Date.now();
 
-    if (!banDisabled && ip && ipBans.has(ip) && ipBans.get(ip) > now) {
+    const bannedUntil = ip ? ipBans.get(ip) : undefined;
+    if (!banDisabled && ip && bannedUntil !== undefined && bannedUntil > now) {
       return {
         status: 'hard_limit',
-        retry_after_ms: ipBans.get(ip) - now,
+        retry_after_ms: bannedUntil - now,
         limit_type: 'ip_ban'
       };
     }
@@ -185,13 +240,16 @@ function createRateLimiter(options) {
     return { status: 'ok' };
   }
 
+  /** @param {string} token */
   function releaseToken(token) { tokens.delete(token); }
 
+  /** @param {string | null | undefined} ip @param {number} [ms] */
   function banIp(ip, ms) {
     if (!ip || banDisabled) return;
     ipBans.set(ip, Date.now() + (ms || banMs));
   }
 
+  /** @param {string | null | undefined} ip */
   function isIpBanned(ip) {
     if (!ip) return false;
     const until = ipBans.get(ip);
@@ -203,6 +261,7 @@ function createRateLimiter(options) {
     return true;
   }
 
+  /** @param {string | null | undefined} ip */
   function banRemainingMs(ip) {
     if (!ip) return 0;
     const until = ipBans.get(ip);
@@ -210,6 +269,7 @@ function createRateLimiter(options) {
     return Math.max(0, until - Date.now());
   }
 
+  /** @param {string} ip */
   function unbanIp(ip) { ipBans.delete(ip); }
 
   function _stats() {
@@ -239,6 +299,7 @@ function createRateLimiter(options) {
   };
 }
 
+/** @returns {import('./types/index.js').RateLimiter} */
 function createNoopLimiter() {
   return {
     consume: () => ({ status: 'ok' }),

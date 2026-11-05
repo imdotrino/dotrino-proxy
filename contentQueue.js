@@ -30,15 +30,25 @@ const { encodeFrame, decodeFrame, FRAME_VERSION } = require('./body');
 const TIMEOUT_MS = 10000;
 const RECHECK_MS = 60 * 1000;
 
+/**
+ * @param {string} message
+ * @param {string} code
+ * @returns {Error & { code: string }}
+ */
 function err(message, code) {
     return Object.assign(new Error(message), { code });
 }
 
+/**
+ * @param {string} url
+ * @param {RequestInit} [opts]
+ * @returns {Promise<Response>}
+ */
 async function request(url, opts = {}) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
-    catch (e) { throw err(`content node unreachable at ${url}: ${e.message}`, 'content-unreachable'); }
+    catch (e) { throw err(`content node unreachable at ${url}: ${/** @type {Error} */ (e).message}`, 'content-unreachable'); }
     finally { clearTimeout(t); }
 }
 
@@ -49,8 +59,11 @@ async function request(url, opts = {}) {
 function createContentQueue({ url, owner, log = console.log }) {
     const base = String(url).replace(/\/+$/, '');
     // ready: null = sin comprobar todavía; true = es el node de nuestra cuenta; false = no.
+    /** @type {{ ready: boolean | null, reason: string | null, owner: string | null }} */
     const state = { ready: null, reason: null, owner: null };
+    /** @type {Promise<boolean | null> | null} */
     let checking = null;
+    /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
 
     async function check() {
@@ -65,8 +78,9 @@ function createContentQueue({ url, owner, log = console.log }) {
             if (state.ready !== true) log(`[queue] in-flight messages are stored in the content node ${base} (account ${mine.slice(0, 12)}…)`);
             state.ready = true; state.reason = null; state.owner = mine;
         } catch (e) {
-            if (state.reason !== e.code) console.error(`[queue] the content node cannot hold the offline queue: ${e.message}`);
-            state.ready = false; state.reason = e.code || 'content-unreachable';
+            const ce = /** @type {Error & { code?: string }} */ (e);
+            if (state.reason !== ce.code) console.error(`[queue] the content node cannot hold the offline queue: ${ce.message}`);
+            state.ready = false; state.reason = ce.code || 'content-unreachable';
         }
         return state.ready;
     }
@@ -88,7 +102,13 @@ function createContentQueue({ url, owner, log = console.log }) {
 
     function stop() { if (timer) clearInterval(timer); timer = null; }
 
-    /** Guarda el cuerpo y devuelve su `cid`. Lanza con `code` si no se pudo. */
+    /**
+     * Guarda el cuerpo y devuelve su `cid`. Lanza con `code` si no se pudo.
+     * @param {string} recipient
+     * @param {unknown} message  texto/JSON o bytes (Buffer)
+     * @param {number} expiresAt
+     * @returns {Promise<string>}
+     */
     async function put(recipient, message, expiresAt) {
         if (!(await ensure())) throw err(`offline queue unavailable: ${state.reason}`, 'queue-unavailable');
         // Un cuerpo en bytes (body.js) se guarda en crudo detrás de la envoltura, sin base64:
@@ -97,7 +117,8 @@ function createContentQueue({ url, owner, log = console.log }) {
         const body = Buffer.isBuffer(message) ? encodeFrame(wrap, message) : JSON.stringify({ ...wrap, message });
         const ttl = Math.max(60 * 1000, expiresAt - Date.now());
         const r = await request(`${base}/c?enc=1&ttl=${ttl}`, {
-            method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body
+            // Un Buffer es un Uint8Array y fetch lo acepta; sus tipos (TS 5.9) no lo ven por el genérico.
+            method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: /** @type {BodyInit} */ (body)
         });
         if (!r.ok) {
             // Un 5xx o un 507 (cuota) dicen que el node está mal: se vuelve a comprobar.
@@ -109,7 +130,12 @@ function createContentQueue({ url, owner, log = console.log }) {
         return out.cid;
     }
 
-    /** El mensaje guardado en `cid`. Lanza con `code` si no está o no cuadra. */
+    /**
+     * El mensaje guardado en `cid`. Lanza con `code` si no está o no cuadra.
+     * @param {string} cid
+     * @param {string} recipient
+     * @returns {Promise<unknown>}
+     */
     async function get(cid, recipient) {
         const r = await request(`${base}/c/${encodeURIComponent(cid)}`);
         if (r.status === 404) throw err(`queued message ${cid} is gone from the content node`, 'queue-gone');
@@ -118,6 +144,7 @@ function createContentQueue({ url, owner, log = console.log }) {
         // El cid ES el hash: lo que no cuadre no se entrega, venga de donde venga.
         const hash = 'sha256-' + crypto.createHash('sha256').update(bytes).digest('hex');
         if (hash !== cid) throw err(`queued message ${cid} does not match its hash`, 'queue-corrupt');
+        /** @type {{ to: unknown, message: unknown }} */
         let body;
         if (bytes[0] === FRAME_VERSION) {
             const f = decodeFrame(bytes);
@@ -129,13 +156,16 @@ function createContentQueue({ url, owner, log = console.log }) {
         return body.message;
     }
 
-    /** Borra un cuerpo ya entregado o descartado. Lo que falle lo recoge el GC del node al vencer. */
+    /**
+     * Borra un cuerpo ya entregado o descartado. Lo que falle lo recoge el GC del node al vencer.
+     * @param {string} cid
+     */
     async function remove(cid) {
         try {
             const r = await request(`${base}/c/${encodeURIComponent(cid)}`, { method: 'DELETE' });
             if (!r.ok && r.status !== 404) console.warn(`[queue] could not delete ${cid} from the content node (${r.status}); its ttl will collect it`);
         } catch (e) {
-            console.warn(`[queue] could not delete ${cid} from the content node (${e.message}); its ttl will collect it`);
+            console.warn(`[queue] could not delete ${cid} from the content node (${/** @type {Error} */ (e).message}); its ttl will collect it`);
         }
     }
 

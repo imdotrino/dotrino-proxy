@@ -46,9 +46,14 @@ const QUERY = `query ($account: String!, $from: Date!, $to: Date!, $key: String!
   }
 }`;
 
+/** @param {number} now */
 const utcDay = (now) => new Date(now).toISOString().slice(0, 10);
+/** @param {number} now */
 const msToNextUtcDay = (now) => Math.max(1000, DAY_MS - (now % DAY_MS));
 
+/**
+ * @param {import('./types/index.js').TurnUsageOptions} [opts]
+ */
 function createTurnUsage(opts = {}) {
     const accountId = opts.accountId ?? process.env.TURN_ACCOUNT_ID ?? '';
     const apiToken = opts.apiToken ?? process.env.TURN_ANALYTICS_API_TOKEN ?? '';
@@ -67,12 +72,17 @@ function createTurnUsage(opts = {}) {
     const capBytes = Math.floor(dailyGb * GB);
 
     // La última lectura buena: { day, egressBytes, at }.
+    /** @type {{ day: string, egressBytes: number, at: number } | null} */
     let last = null;
+    /** @type {string | null} */
     let lastError = null;
+    /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
     // La lectura en curso, para que quien pregunta mientras tanto la espere en vez de rebotar.
+    /** @type {Promise<{ day: string, egressBytes: number, at: number } | null> | null} */
     let pending = null;
     // Lo ya avisado, para que cada cosa suene UNA vez: el día del tope y el episodio sin lectura.
+    /** @type {string | null} */
     let alertedCapDay = null;
     let alertedUnknown = false;
 
@@ -82,7 +92,7 @@ function createTurnUsage(opts = {}) {
         const t = ac ? setTimeout(() => ac.abort(), fetchTimeoutMs) : null;
         let res;
         try {
-            res = await fetchImpl(api, {
+            res = await /** @type {typeof fetch} */ (fetchImpl)(api, { // solo con `enabled`, que exige fetchImpl
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ query: QUERY, variables: { account: accountId, from: day, to: day, key: keyId } }),
@@ -124,10 +134,11 @@ function createTurnUsage(opts = {}) {
                 onAlert({ kind: 'turn-daily-cap', day: r.day, egressBytes: r.egressBytes, capBytes });
             }
         } catch (e) {
-            lastError = e.message;
+            const err = /** @type {Error} */ (e);
+            lastError = err.message;
             if (!fresh() && !alertedUnknown) {
                 alertedUnknown = true;
-                onAlert({ kind: 'turn-usage-unknown', error: e.message, capBytes });
+                onAlert({ kind: 'turn-usage-unknown', error: err.message, capBytes });
             }
         }
         return last;
@@ -146,7 +157,8 @@ function createTurnUsage(opts = {}) {
     function allowed() {
         if (!enabled) return { ok: true };
         if (!fresh()) return { ok: false, reason: 'turn-usage-unknown', retry_after_ms: Math.min(pollMs, 60 * 1000) };
-        if (last.egressBytes >= capBytes) return { ok: false, reason: 'turn-daily-cap', retry_after_ms: msToNextUtcDay(now()) };
+        // `fresh()` ya vio que hay lectura.
+        if (/** @type {NonNullable<typeof last>} */ (last).egressBytes >= capBytes) return { ok: false, reason: 'turn-daily-cap', retry_after_ms: msToNextUtcDay(now()) };
         return { ok: true };
     }
 

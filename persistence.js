@@ -17,8 +17,23 @@ const { toJson, fromJson } = require('./body');
 
 const { DatabaseSync } = require('node:sqlite');
 
+/** @type {import('node:sqlite').DatabaseSync | null} */
 let db = null;
 
+/**
+ * La base abierta por `init`. Usarla antes es un fallo del llamador: se dice con un error
+ * que se pueda buscar, en vez del «cannot read properties of null» de antes.
+ * @returns {import('node:sqlite').DatabaseSync}
+ */
+function getDb() {
+    if (!db) throw new Error('persistence: not initialized (call init first)');
+    return db;
+}
+
+/**
+ * @param {string} dbFile
+ * @returns {import('node:sqlite').DatabaseSync}
+ */
 function init(dbFile) {
     db = new DatabaseSync(dbFile);
     db.exec('PRAGMA journal_mode = WAL;');
@@ -138,20 +153,26 @@ function init(dbFile) {
 // Se upsertea en cada identify; con TTL para olvidar identidades que ya no usan
 // este proxy. Permite que, al recibir un mensaje federado, sólo el HOME encole.
 
+/** @param {string} pubkey @param {number} now */
 function upsertHome(pubkey, now) {
-    db.prepare(`
+    getDb().prepare(`
         INSERT INTO home_registrations (pubkey, updated_at) VALUES (?, ?)
         ON CONFLICT(pubkey) DO UPDATE SET updated_at = excluded.updated_at
     `).run(pubkey, now);
 }
 
+/**
+ * @param {number} minUpdatedAt
+ * @returns {string[]}
+ */
 function loadHomes(minUpdatedAt) {
-    return db.prepare('SELECT pubkey FROM home_registrations WHERE updated_at >= ?')
-        .all(minUpdatedAt).map(r => r.pubkey);
+    return getDb().prepare('SELECT pubkey FROM home_registrations WHERE updated_at >= ?')
+        .all(minUpdatedAt).map(r => String(r.pubkey));
 }
 
+/** @param {number} cutoff */
 function deleteExpiredHomes(cutoff) {
-    db.prepare('DELETE FROM home_registrations WHERE updated_at < ?').run(cutoff);
+    getDb().prepare('DELETE FROM home_registrations WHERE updated_at < ?').run(cutoff);
 }
 
 // ----- directorio de llaves de cifrado -----------------------------------
@@ -161,8 +182,15 @@ function deleteExpiredHomes(cutoff) {
  * firma y va dentro de lo firmado, así que un tercero no puede retroceder la llave de
  * nadie reenviando un anuncio viejo por la malla.
  */
+/**
+ * @param {string} pubkey
+ * @param {string} data       JSON del anuncio
+ * @param {string} signature
+ * @param {number} ts
+ * @param {number} now
+ */
 function upsertEncPub(pubkey, data, signature, ts, now) {
-    db.prepare(`
+    getDb().prepare(`
         INSERT INTO enc_pubkeys (pubkey, data, signature, ts, updated_at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(pubkey) DO UPDATE SET
             data = excluded.data, signature = excluded.signature,
@@ -171,24 +199,34 @@ function upsertEncPub(pubkey, data, signature, ts, now) {
     `).run(pubkey, data, signature, ts, now);
 }
 
+/**
+ * @param {number} minUpdatedAt
+ * @returns {import('./types/index.js').EncPubRow[]}
+ */
 function loadEncPubs(minUpdatedAt) {
-    return db.prepare('SELECT pubkey, data, signature, ts FROM enc_pubkeys WHERE updated_at >= ?')
-        .all(minUpdatedAt);
+    return /** @type {import('./types/index.js').EncPubRow[]} */ (/** @type {unknown} */ (getDb().prepare('SELECT pubkey, data, signature, ts FROM enc_pubkeys WHERE updated_at >= ?')
+        .all(minUpdatedAt)));
 }
 
+/** @param {number} cutoff */
 function deleteExpiredEncPubs(cutoff) {
-    db.prepare('DELETE FROM enc_pubkeys WHERE updated_at < ?').run(cutoff);
+    getDb().prepare('DELETE FROM enc_pubkeys WHERE updated_at < ?').run(cutoff);
 }
 
 // ----- meta (clave-valor para config persistida, p.ej. VAPID) ------------
 
+/**
+ * @param {string} key
+ * @returns {string | null}
+ */
 function getMeta(key) {
-    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
-    return row ? row.value : null;
+    const row = getDb().prepare('SELECT value FROM meta WHERE key = ?').get(key);
+    return row ? /** @type {string} */ (row.value) : null;
 }
 
+/** @param {string} key @param {string} value */
 function setMeta(key, value) {
-    db.prepare(`
+    getDb().prepare(`
         INSERT INTO meta (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
@@ -197,20 +235,27 @@ function setMeta(key, value) {
 // ----- push subscriptions ------------------------------------------------
 
 // Map<pubkey, Map<app, subscription>>; app '' = una suscripción que no dijo de qué app es.
+/** @returns {Map<string, Map<string, import('./types/index.js').StoredSubscription>>} pubkey → app → suscripción */
 function loadPushSubscriptions() {
-    const rows = db.prepare('SELECT pubkey, app, subscription FROM push_subscriptions').all();
+    const rows = /** @type {Array<{ pubkey: string, app: string | null, subscription: string }>} */ (/** @type {unknown} */ (getDb().prepare('SELECT pubkey, app, subscription FROM push_subscriptions').all()));
+    /** @type {Map<string, Map<string, import('./types/index.js').StoredSubscription>>} */
     const out = new Map();
     for (const r of rows) {
         try {
             if (!out.has(r.pubkey)) out.set(r.pubkey, new Map());
-            out.get(r.pubkey).set(r.app || '', JSON.parse(r.subscription));
+            /** @type {Map<string, import('./types/index.js').StoredSubscription>} */ (out.get(r.pubkey)).set(r.app || '', JSON.parse(r.subscription));
         } catch (_) {}
     }
     return out;
 }
 
+/**
+ * @param {string} pubkey
+ * @param {string | null | undefined} app
+ * @param {import('./types/index.js').StoredSubscription} subscription
+ */
 function upsertPushSubscription(pubkey, app, subscription) {
-    db.prepare(`
+    getDb().prepare(`
         INSERT INTO push_subscriptions (pubkey, app, subscription, updated_at)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(pubkey, app) DO UPDATE SET subscription = excluded.subscription, updated_at = excluded.updated_at
@@ -218,27 +263,37 @@ function upsertPushSubscription(pubkey, app, subscription) {
 }
 
 // Sin `app` (undefined) borra todas las de esa llave; con app, solo esa.
+/**
+ * @param {string} pubkey
+ * @param {string | null} [app]  sin app: todas las de la pubkey
+ */
 function deletePushSubscription(pubkey, app) {
-    if (app === undefined) db.prepare('DELETE FROM push_subscriptions WHERE pubkey = ?').run(pubkey);
-    else db.prepare('DELETE FROM push_subscriptions WHERE pubkey = ? AND app = ?').run(pubkey, app || '');
+    if (app === undefined) getDb().prepare('DELETE FROM push_subscriptions WHERE pubkey = ?').run(pubkey);
+    else getDb().prepare('DELETE FROM push_subscriptions WHERE pubkey = ? AND app = ?').run(pubkey, app || '');
 }
 
 // ----- offline queue -----------------------------------------------------
 
 // Devuelve Map<pubkey, Array<item>> donde item incluye su `id` de fila.
+/**
+ * @param {number} now
+ * @returns {Map<string, import('./types/index.js').QueuedItem[]>}
+ */
 function loadOfflineQueue(now) {
-    db.prepare('DELETE FROM offline_queue WHERE expires_at < ?').run(now);
-    const rows = db.prepare(`
+    getDb().prepare('DELETE FROM offline_queue WHERE expires_at < ?').run(now);
+    const rows = /** @type {Array<{ id: number, pubkey: string, from_token: string | null, from_pubkey: string | null, message: string, queued_at: number, expires_at: number, bytes: number, app: string | null, cid: string | null }>} */ (/** @type {unknown} */ (getDb().prepare(`
         SELECT id, pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app, cid
         FROM offline_queue ORDER BY id ASC
-    `).all();
+    `).all()));
+    /** @type {Map<string, import('./types/index.js').QueuedItem[]>} */
     const out = new Map();
     for (const r of rows) {
         if (!out.has(r.pubkey)) out.set(r.pubkey, []);
+        /** @type {unknown} */
         let message = r.message;
         if (r.cid) message = undefined;
         else { try { message = fromJson(JSON.parse(r.message)); } catch (_) { /* fila legacy en texto plano */ } }
-        out.get(r.pubkey).push({
+        /** @type {import('./types/index.js').QueuedItem[]} */ (out.get(r.pubkey)).push({
             id: r.id,
             from: r.from_token,
             fromPubkey: r.from_pubkey,
@@ -253,66 +308,92 @@ function loadOfflineQueue(now) {
 }
 
 // Inserta una fila y devuelve su id (para poder borrarla luego en flush/evict).
+/**
+ * @param {string} pubkey
+ * @param {import('./types/index.js').QueuedItem} item
+ * @returns {number} el id de la fila
+ */
 function insertQueued(pubkey, item) {
     // `message` puede ser objeto; SQLite solo bindea texto/números → serializamos
     // siempre a JSON (y se parsea al rehidratar). Round-trip estable.
     // Un cuerpo en bytes (body.js) va en base64 marcado: JSON.stringify de un Buffer lo
     // escribiría como una lista de números.
     const msgText = item.cid ? 'null' : JSON.stringify(toJson(item.message));
-    const info = db.prepare(`
+    const info = getDb().prepare(`
         INSERT INTO offline_queue (pubkey, from_token, from_pubkey, message, queued_at, expires_at, bytes, app, cid)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(pubkey, item.from || null, item.fromPubkey || null, msgText, item.queuedAt, item.expiresAt, item.bytes || 0, item.app || null, item.cid || null);
     return Number(info.lastInsertRowid);
 }
 
+/** @param {number[] | null | undefined} ids */
 function deleteQueuedByIds(ids) {
     if (!ids || !ids.length) return;
     const placeholders = ids.map(() => '?').join(',');
-    db.prepare(`DELETE FROM offline_queue WHERE id IN (${placeholders})`).run(...ids);
+    getDb().prepare(`DELETE FROM offline_queue WHERE id IN (${placeholders})`).run(...ids);
 }
 
+/** @param {string} pubkey */
 function deleteQueuedForPubkey(pubkey) {
-    db.prepare('DELETE FROM offline_queue WHERE pubkey = ?').run(pubkey);
+    getDb().prepare('DELETE FROM offline_queue WHERE pubkey = ?').run(pubkey);
 }
 
+/** @param {number} now */
 function deleteExpired(now) {
-    db.prepare('DELETE FROM offline_queue WHERE expires_at < ?').run(now);
+    getDb().prepare('DELETE FROM offline_queue WHERE expires_at < ?').run(now);
 }
 
 // ----- scheduled pushes (auto-recordatorios; target = owner pubkey) ------
 
+/**
+ * @param {{ pubkey: string, app?: string | null, payload?: string | null, nextFire: number, cron?: string | null, tz?: string | null }} p
+ * @returns {number} el id de la fila
+ */
 function insertScheduledPush({ pubkey, app, payload, nextFire, cron, tz }) {
     const now = Date.now();
-    const info = db.prepare(`
+    const info = getDb().prepare(`
         INSERT INTO scheduled_pushes (pubkey, app, payload, next_fire, cron, tz, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(pubkey, app || null, payload || null, nextFire, cron || null, tz || null, now, now);
     return Number(info.lastInsertRowid);
 }
 
+/**
+ * @param {string} pubkey
+ * @returns {import('./types/index.js').ScheduledPushRow[]}
+ */
 function listScheduledPushesForPubkey(pubkey) {
-    return db.prepare(`
+    return /** @type {import('./types/index.js').ScheduledPushRow[]} */ (/** @type {unknown} */ (getDb().prepare(`
         SELECT id, pubkey, app, payload, next_fire, cron, tz, created_at, updated_at
         FROM scheduled_pushes WHERE pubkey = ? ORDER BY next_fire ASC
-    `).all(pubkey);
+    `).all(pubkey)));
 }
 
+/**
+ * @param {number} id
+ * @returns {import('./types/index.js').ScheduledPushRow | undefined}
+ */
 function getScheduledPush(id) {
-    return db.prepare('SELECT * FROM scheduled_pushes WHERE id = ?').get(id);
+    return /** @type {import('./types/index.js').ScheduledPushRow | undefined} */ (getDb().prepare('SELECT * FROM scheduled_pushes WHERE id = ?').get(id));
 }
 
+/** @param {number} id */
 function deleteScheduledPush(id) {
-    db.prepare('DELETE FROM scheduled_pushes WHERE id = ?').run(id);
+    getDb().prepare('DELETE FROM scheduled_pushes WHERE id = ?').run(id);
 }
 
+/** @param {number} id @param {number} nextFire */
 function updateScheduledPushNextFire(id, nextFire) {
-    db.prepare('UPDATE scheduled_pushes SET next_fire = ?, updated_at = ? WHERE id = ?')
+    getDb().prepare('UPDATE scheduled_pushes SET next_fire = ?, updated_at = ? WHERE id = ?')
         .run(nextFire, Date.now(), id);
 }
 
+/**
+ * @param {number} now
+ * @returns {import('./types/index.js').ScheduledPushRow[]}
+ */
 function loadDueScheduledPushes(now) {
-    return db.prepare('SELECT * FROM scheduled_pushes WHERE next_fire <= ? ORDER BY next_fire ASC').all(now);
+    return /** @type {import('./types/index.js').ScheduledPushRow[]} */ (/** @type {unknown} */ (getDb().prepare('SELECT * FROM scheduled_pushes WHERE next_fire <= ? ORDER BY next_fire ASC').all(now)));
 }
 
 // ----- peer_nodes (federación: identidad pineada de cada proxy peer) -----
@@ -322,23 +403,32 @@ function loadDueScheduledPushes(now) {
 // URL vuelva con otra pubkey; un cambio legítimo de llave se hace a mano
 // (borrando la fila), que es exactamente cuando el operador quiere enterarse.
 
+/** @returns {import('./types/index.js').PeerNodeRow[]} */
 function loadPeerNodes() {
-    return db.prepare('SELECT url, pubkey, node_id, pinned_at, updated_at FROM peer_nodes').all();
+    return /** @type {import('./types/index.js').PeerNodeRow[]} */ (/** @type {unknown} */ (getDb().prepare('SELECT url, pubkey, node_id, pinned_at, updated_at FROM peer_nodes').all()));
 }
 
+/**
+ * @param {string} url
+ * @param {string} pubkey
+ * @param {string} nodeId
+ * @param {number} now
+ */
 function pinPeerNode(url, pubkey, nodeId, now) {
-    db.prepare(`
+    getDb().prepare(`
         INSERT INTO peer_nodes (url, pubkey, node_id, pinned_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
     `).run(url, pubkey, nodeId, now, now);
 }
 
+/** @param {string} url @param {number} now */
 function touchPeerNode(url, now) {
-    db.prepare('UPDATE peer_nodes SET updated_at = ? WHERE url = ?').run(now, url);
+    getDb().prepare('UPDATE peer_nodes SET updated_at = ? WHERE url = ?').run(now, url);
 }
 
+/** @param {string} url */
 function deletePeerNode(url) {
-    db.prepare('DELETE FROM peer_nodes WHERE url = ?').run(url);
+    getDb().prepare('DELETE FROM peer_nodes WHERE url = ?').run(url);
 }
 
 module.exports = {
